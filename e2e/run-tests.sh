@@ -1,54 +1,54 @@
 #!/usr/bin/env bash
 # End-to-end tests against the local tailnet (run setup.sh first). Builds
-# tsnx-host for Linux and runs it on the compose network next to peer1.
+# wgnx-host for Linux and runs it on the compose network next to peer1.
 set -uo pipefail
 cd "$(dirname "$0")"
 PEER_IP=100.64.0.1
-SELF=tsnx-e2e
+SELF=wgnx-e2e
 fails=0
 pass() { printf '\033[32mPASS\033[0m %s\n' "$1"; }
 fail() { printf '\033[31mFAIL\033[0m %s\n' "$1"; fails=$((fails + 1)); }
 
-docker compose build -q tsnx-build >/dev/null 2>&1
-docker compose run --rm -e CARGO_PROFILE_FLAG=--release -e RUST_PROFILE_DIR=release tsnx-build >/dev/null 2>&1 \
+docker compose build -q wgnx-build >/dev/null 2>&1
+docker compose run --rm -e CARGO_PROFILE_FLAG=--release -e RUST_PROFILE_DIR=release wgnx-build >/dev/null 2>&1 \
   || { echo "build failed"; exit 1; }
-tsnx() { docker compose run --rm -T tsnx "$@" --control https://headscale --authkey "$(cat state/authkey)" \
+wgnx() { docker compose run --rm -T wgnx "$@" --control https://headscale --authkey "$(cat state/authkey)" \
   --hostname "$SELF" --state /state/host/e2e.state --port 41641; }
 peer() { docker compose exec -T peer "$@"; }
 
 # 1. Outbound TCP+UDP echo, upgrading to a direct path.
-if tsnx up --echo-test "$PEER_IP" --expect-direct >/tmp/tsnx-e2e-1.log 2>&1; then pass "echo + direct path"; else fail "echo + direct path (see /tmp/tsnx-e2e-1.log)"; fi
+if wgnx up --echo-test "$PEER_IP" --expect-direct >/tmp/wgnx-e2e-1.log 2>&1; then pass "echo + direct path"; else fail "echo + direct path (see /tmp/wgnx-e2e-1.log)"; fi
 
 # 2. Same with direct UDP blocked: must work over DERP.
 peer iptables -I INPUT -s 172.30.0.30 -p udp -j DROP
 peer iptables -I OUTPUT -d 172.30.0.30 -p udp -j DROP
-if tsnx up --echo-test "$PEER_IP" >/tmp/tsnx-e2e-2.log 2>&1; then pass "echo via DERP only"; else fail "echo via DERP only (see /tmp/tsnx-e2e-2.log)"; fi
+if wgnx up --echo-test "$PEER_IP" >/tmp/wgnx-e2e-2.log 2>&1; then pass "echo via DERP only"; else fail "echo via DERP only (see /tmp/wgnx-e2e-2.log)"; fi
 peer iptables -D INPUT -s 172.30.0.30 -p udp -j DROP
 peer iptables -D OUTPUT -d 172.30.0.30 -p udp -j DROP
 
 # 3. Inbound: the stock client pings us (disco, then ICMP through WireGuard).
-docker compose run --rm -T -d --name tsnx-e2e-bg tsnx up --control https://headscale \
+docker compose run --rm -T -d --name wgnx-e2e-bg wgnx up --control https://headscale \
   --hostname "$SELF" --state /state/host/e2e.state --port 41641 >/dev/null
 sleep 5
 SELF_IP=$(peer tailscale status --json | python3 -c "import json,sys; print(next(p['TailscaleIPs'][0] for p in json.load(sys.stdin)['Peer'].values() if p['HostName']=='$SELF'))")
 if peer tailscale ping -c 5 "$SELF_IP" | grep -q "via 172.30.0.30"; then pass "inbound disco ping (direct)"; else fail "inbound disco ping"; fi
 if peer ping -c 5 -W 2 "$SELF_IP" >/dev/null; then pass "inbound ICMP"; else fail "inbound ICMP"; fi
-docker rm -f tsnx-e2e-bg >/dev/null
+docker rm -f wgnx-e2e-bg >/dev/null
 
 # 4-6. Unmodified programs through the socket virtualization layer (the code
 # the Switch MITM uses), via LD_PRELOAD.
 preload() {
-  docker compose run --rm -T -e TSNX_CONTROL_URL=https://headscale -e TSNX_EXTRA_ROOT=/state/certs/ca.der \
-    -e TSNX_STATE=/state/host/preload.state -e TSNX_AUTHKEY="$(cat state/authkey)" -e TSNX_HOSTNAME=tsnx-preload \
-    -e TSNX_PORT=41642 -e TSNX_WAIT_READY=1 -e LD_PRELOAD=/src/target/linux/libtsnx_interpose.so \
-    --entrypoint sh tsnx -c "$1"
+  docker compose run --rm -T -e WGNX_CONTROL_URL=https://headscale -e WGNX_EXTRA_ROOT=/state/certs/ca.der \
+    -e WGNX_STATE=/state/host/preload.state -e WGNX_AUTHKEY="$(cat state/authkey)" -e WGNX_HOSTNAME=wgnx-preload \
+    -e WGNX_PORT=41642 -e WGNX_WAIT_READY=1 -e LD_PRELOAD=/src/target/linux/libwgnx_interpose.so \
+    --entrypoint sh wgnx -c "$1"
 }
 # Warm up once so the preload node's keys exist and peers know them.
 preload "curl -s -m 10 -o /dev/null http://$PEER_IP:8080/" >/dev/null 2>&1
-if preload "/src/target/linux/vsock-test $PEER_IP 172.30.0.10:443" >/tmp/tsnx-e2e-4.log 2>&1; then
+if preload "/src/target/linux/vsock-test $PEER_IP 172.30.0.10:443" >/tmp/wgnx-e2e-4.log 2>&1; then
   pass "socket virtualization suite (vsock-test)"
 else
-  fail "socket virtualization suite (see /tmp/tsnx-e2e-4.log)"
+  fail "socket virtualization suite (see /tmp/wgnx-e2e-4.log)"
 fi
 if preload "curl -s -m 10 http://$PEER_IP:8080/" 2>/dev/null | grep -q "<html"; then pass "unmodified curl over the tailnet"; else fail "unmodified curl"; fi
 udp=$(preload "iperf3 -c $PEER_IP -u -b 50M -l 1200 -t 4 -R -f m 2>&1 | grep receiver" 2>/dev/null)
@@ -59,11 +59,11 @@ if awk "BEGIN{exit !(${tcp:-0} >= 100)}"; then pass "TCP bulk upload (got ${tcp}
 
 # 7. Access rules: the policy (headscale/policy.hujson) allows everything but
 # port 7777, and our node must enforce that for inbound connections.
-docker rm -f tsnx-acl >/dev/null 2>&1
-docker compose run --rm -T -d --name tsnx-acl -e TSNX_CONTROL_URL=https://headscale \
-  -e TSNX_EXTRA_ROOT=/state/certs/ca.der -e TSNX_STATE=/state/host/acl.state \
-  -e TSNX_AUTHKEY="$(cat state/authkey)" -e TSNX_HOSTNAME=tsnx-acl -e TSNX_PORT=41645 -e TSNX_WAIT_READY=1 \
-  -e LD_PRELOAD=/src/target/linux/libtsnx_interpose.so --entrypoint python3 tsnx -c '
+docker rm -f wgnx-acl >/dev/null 2>&1
+docker compose run --rm -T -d --name wgnx-acl -e WGNX_CONTROL_URL=https://headscale \
+  -e WGNX_EXTRA_ROOT=/state/certs/ca.der -e WGNX_STATE=/state/host/acl.state \
+  -e WGNX_AUTHKEY="$(cat state/authkey)" -e WGNX_HOSTNAME=wgnx-acl -e WGNX_PORT=41645 -e WGNX_WAIT_READY=1 \
+  -e LD_PRELOAD=/src/target/linux/libwgnx_interpose.so --entrypoint python3 wgnx -c '
 import socket, threading
 socket.socket().close()  # starts the engine (the shim starts it on first use)
 def serve(port):
@@ -74,7 +74,7 @@ for p in (7000, 7001, 7777): threading.Thread(target=serve, args=(p,), daemon=Tr
 threading.Event().wait()' >/dev/null
 ACL_IP=""
 for _ in $(seq 30); do
-  ACL_IP=$(peer tailscale status --json 2>/dev/null | python3 -c "import json,sys; print(next((p['TailscaleIPs'][0] for p in json.load(sys.stdin)['Peer'].values() if p['HostName']=='tsnx-acl' and p.get('Online')), ''))")
+  ACL_IP=$(peer tailscale status --json 2>/dev/null | python3 -c "import json,sys; print(next((p['TailscaleIPs'][0] for p in json.load(sys.stdin)['Peer'].values() if p['HostName']=='wgnx-acl' and p.get('Online')), ''))")
   [[ -n "$ACL_IP" ]] && peer nc -z -w 3 "$ACL_IP" 7000 2>/dev/null && break
   sleep 1
 done
@@ -85,7 +85,7 @@ if [[ -n "$ACL_IP" ]] && peer nc -z -w 3 "$ACL_IP" 7000 2>/dev/null && peer nc -
 else
   fail "access rules enforced for inbound connections (ip ${ACL_IP:-none})"
 fi
-docker rm -f tsnx-acl >/dev/null 2>&1
+docker rm -f wgnx-acl >/dev/null 2>&1
 
 # 8. Node key expiry: a fresh node key replaces the expired one (keeping the
 # node's identity and address). With a reusable auth key that happens on its
@@ -99,11 +99,11 @@ wait_log() {  # container, pattern, seconds[, count]
   done
   return 1
 }
-EXP=tsnx-e2e-expiry
+EXP=wgnx-e2e-expiry
 docker run --rm -v "$PWD/state:/s" alpine rm -f /s/host/expiry-e2e.state
 old_id=$(node_id "$EXP"); [[ -n "$old_id" ]] && hs nodes delete -i "$old_id" --force >/dev/null
 expiry_client() {  # extra args...
-  docker compose run --rm -T -d --name "$EXP" tsnx up --control https://headscale --hostname "$EXP" \
+  docker compose run --rm -T -d --name "$EXP" wgnx up --control https://headscale --hostname "$EXP" \
     --state /state/host/expiry-e2e.state --port 41644 "$@" >/dev/null
 }
 expiry_client --authkey "$(cat state/authkey)"
@@ -123,7 +123,7 @@ if wait_log "$EXP" Authorized 30; then
   expiry_client
   if wait_log "$EXP" LoginUrl 30; then
     req=$(docker logs "$EXP" 2>&1 | grep -o "hskey-authreq-[A-Za-z0-9_-]*" | tail -1)
-    hs nodes register --user tsnx --key "$req" >/dev/null
+    hs nodes register --user wgnx --key "$req" >/dev/null
     if wait_log "$EXP" Authorized 30 && [[ "$(grep node= state/host/expiry-e2e.state)" != "$key2" ]] &&
        [[ "$(node_id "$EXP")" == "$id" ]]; then
       pass "expired key replaced at startup via login URL"
@@ -140,13 +140,13 @@ fi
 docker rm -f "$EXP" >/dev/null 2>&1
 
 # 9. Taildrop: the stock client sends files with `tailscale file cp`.
-DROP=tsnx-drop
+DROP=wgnx-drop
 docker rm -f "$DROP" >/dev/null 2>&1
-docker compose run --rm -T -d --name "$DROP" -e TSNX_CONTROL_URL=https://headscale \
-  -e TSNX_EXTRA_ROOT=/state/certs/ca.der -e TSNX_STATE=/state/host/drop.state \
-  -e TSNX_AUTHKEY="$(cat state/authkey)" -e TSNX_HOSTNAME="$DROP" -e TSNX_PORT=41646 -e TSNX_WAIT_READY=1 \
-  -e TSNX_TAILDROP_DIR=/tmp/Taildrop -e LD_PRELOAD=/src/target/linux/libtsnx_interpose.so \
-  --entrypoint python3 tsnx -c 'import socket, threading; socket.socket().close(); threading.Event().wait()' >/dev/null
+docker compose run --rm -T -d --name "$DROP" -e WGNX_CONTROL_URL=https://headscale \
+  -e WGNX_EXTRA_ROOT=/state/certs/ca.der -e WGNX_STATE=/state/host/drop.state \
+  -e WGNX_AUTHKEY="$(cat state/authkey)" -e WGNX_HOSTNAME="$DROP" -e WGNX_PORT=41646 -e WGNX_WAIT_READY=1 \
+  -e WGNX_TAILDROP_DIR=/tmp/Taildrop -e LD_PRELOAD=/src/target/linux/libwgnx_interpose.so \
+  --entrypoint python3 wgnx -c 'import socket, threading; socket.socket().close(); threading.Event().wait()' >/dev/null
 for _ in $(seq 30); do
   peer tailscale file cp --targets 2>/dev/null | grep -q "$DROP" && break
   sleep 1
@@ -178,11 +178,11 @@ peer sh -c 'ip addr show dev lo | grep -q 10.123.0.1 || ip addr add 10.123.0.1/3
 peer tailscale set --advertise-routes=10.123.0.0/24
 peer_id=$(hs nodes list -o json | python3 -c "import json,sys; print(next(n['id'] for n in json.load(sys.stdin) if n.get('given_name')=='peer1'))")
 hs nodes approve-routes -i "$peer_id" -r 10.123.0.0/24 >/dev/null
-routed() {  # TSNX_ACCEPT_ROUTES value
-  docker compose run --rm -T -e TSNX_CONTROL_URL=https://headscale -e TSNX_EXTRA_ROOT=/state/certs/ca.der \
-    -e TSNX_STATE=/state/host/routes.state -e TSNX_AUTHKEY="$(cat state/authkey)" -e TSNX_HOSTNAME=tsnx-routes \
-    -e TSNX_PORT=41647 -e TSNX_WAIT_READY=1 -e TSNX_ACCEPT_ROUTES="$1" -e LD_PRELOAD=/src/target/linux/libtsnx_interpose.so \
-    --entrypoint sh tsnx -c "curl -s -m 8 http://10.123.0.1:8080/"
+routed() {  # WGNX_ACCEPT_ROUTES value
+  docker compose run --rm -T -e WGNX_CONTROL_URL=https://headscale -e WGNX_EXTRA_ROOT=/state/certs/ca.der \
+    -e WGNX_STATE=/state/host/routes.state -e WGNX_AUTHKEY="$(cat state/authkey)" -e WGNX_HOSTNAME=wgnx-routes \
+    -e WGNX_PORT=41647 -e WGNX_WAIT_READY=1 -e WGNX_ACCEPT_ROUTES="$1" -e LD_PRELOAD=/src/target/linux/libwgnx_interpose.so \
+    --entrypoint sh wgnx -c "curl -s -m 8 http://10.123.0.1:8080/"
 }
 if routed 1 2>/dev/null | grep -q "<html" && ! routed 0 2>/dev/null | grep -q "<html"; then
   pass "subnet routes (used only when accepted)"
@@ -194,10 +194,10 @@ peer ip addr del 10.123.0.1/32 dev lo
 
 # 11. Losing the control server: the engine reports the map stream gone and
 # back (what turns the overlay's "Connected" into "Reconnecting...").
-CTL=tsnx-e2e-control
+CTL=wgnx-e2e-control
 docker rm -f "$CTL" >/dev/null 2>&1
 docker run --rm -v "$PWD/state:/s" alpine rm -f /s/host/control-e2e.state
-docker compose run --rm -T -d --name "$CTL" tsnx up --control https://headscale --authkey "$(cat state/authkey)" \
+docker compose run --rm -T -d --name "$CTL" wgnx up --control https://headscale --authkey "$(cat state/authkey)" \
   --hostname "$CTL" --state /state/host/control-e2e.state --port 41648 >/dev/null
 if wait_log "$CTL" "Control(true)" 30; then
   docker compose restart headscale >/dev/null 2>&1

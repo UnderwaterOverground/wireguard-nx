@@ -9,8 +9,8 @@ mkdir -p state/headscale state/peer
 docker compose up -d --wait headscale
 hs() { docker compose exec -T headscale headscale "$@"; }
 
-hs users create tsnx >/dev/null 2>&1 || true
-user_id=$(hs users list -o json | python3 -c 'import json,sys; print(next(u["id"] for u in json.load(sys.stdin) if u["name"]=="tsnx"))')
+hs users create wgnx >/dev/null 2>&1 || true
+user_id=$(hs users list -o json | python3 -c 'import json,sys; print(next(u["id"] for u in json.load(sys.stdin) if u["name"]=="wgnx"))')
 if [[ ! -s state/authkey ]]; then
   hs preauthkeys create --user "$user_id" --reusable --expiration 720h -o json \
     | python3 -c 'import json,sys; print(json.load(sys.stdin)["key"])' > state/authkey

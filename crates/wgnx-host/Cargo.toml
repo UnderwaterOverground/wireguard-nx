@@ -1,0 +1,11 @@
+[package]
+name = "wgnx-host"
+description = "Host (macOS/Linux) driver for wgnx-core"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+wgnx-core = { workspace = true, features = ["std"] }
+log = "0.4"
+env_logger = { version = "0.11", default-features = false, features = ["auto-color", "humantime"] }

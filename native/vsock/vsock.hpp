@@ -6,7 +6,7 @@
 // connected/sent to a tailnet address (100.64.0.0/10, fd7a:115c:a1e0::/48),
 // bound to a tailnet address, or bound to the wildcard address (then it is
 // reachable from both sides: a "dual" socket). Virtual traffic goes through
-// the tsnx engine's overlay sockets.
+// the wgnx engine's overlay sockets.
 //
 // The same code serves the macOS/Linux interpose shim (tests on the dev
 // machine) and the Switch bsd:u MITM; `Backend` abstracts the real stack and
@@ -24,7 +24,7 @@
 
 #include "runtime.hpp"
 
-namespace tsnx {
+namespace wgnx {
 
 // Outcome of a socket call: `ret` as the call would return, `err` an errno
 // value in the backend's numbering when ret < 0.
@@ -108,10 +108,10 @@ public:
     // Tailnet addresses, plus subnet routes in use (SetRoutes) except ones
     // overlapping our own LAN: the local network is reached directly.
     static bool IsTailnet(const sockaddr *addr);
-    // The engine's subnet routes (tsnx_engine_routes), from its thread when
+    // The engine's subnet routes (wgnx_engine_routes), from its thread when
     // peers change. At most MaxRoutes are used.
     static constexpr size_t MaxRoutes = 64;
-    static void SetRoutes(const TsnxPrefix *routes, size_t n);
+    static void SetRoutes(const WgnxPrefix *routes, size_t n);
     // Our LAN: IPv4 address (host byte order; 0 = offline) and prefix length.
     static void SetLocalNet(uint32_t ip, unsigned len);
 
@@ -126,7 +126,7 @@ private:
         bool connecting = false;
         bool connected_virtual = false;
         bool has_udp_peer = false;
-        TsnxAddr udp_peer{};
+        WgnxAddr udp_peer{};
         uint16_t port = 0;       // locally bound port
         bool bound_any = false;  // bound to the wildcard address
         bool virtual_only = false;  // no usable real side (tailnet-bound, accepted)
@@ -142,10 +142,10 @@ private:
     Result EngineErr(int32_t code);
     // Ensures the socket has an engine UDP socket on its port.
     bool EnsureUdp(int fd, VFd &v);
-    // Waits for virtual readiness bits (TSNX_READABLE/WRITABLE/HUP) on id.
+    // Waits for virtual readiness bits (WGNX_READABLE/WRITABLE/HUP) on id.
     bool WaitEngine(int32_t id, uint32_t mask, int timeout_ms);
     // rt_.WaitFor in slices, stopping early if the caller is no longer alive.
-    bool WaitSliced(const std::function<bool(TsnxEngine *)> &ready, const Runtime::Clock::time_point *deadline);
+    bool WaitSliced(const std::function<bool(WgnxEngine *)> &ready, const Runtime::Clock::time_point *deadline);
 
     Backend &real_;
     Runtime &rt_;
@@ -155,4 +155,4 @@ private:
     std::map<int, VFd> fds_;
 };
 
-}  // namespace tsnx
+}  // namespace wgnx

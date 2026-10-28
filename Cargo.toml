@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/tsnx-core", "crates/tsnx-ffi", "crates/tsnx-host"]
+members = ["crates/wgnx-core", "crates/wgnx-ffi", "crates/wgnx-host"]
 exclude = ["third_party"]
 
 [workspace.package]
@@ -9,7 +9,7 @@ license = "BSD-3-Clause"
 version = "1.2.0"
 
 [workspace.dependencies]
-tsnx-core = { path = "crates/tsnx-core", default-features = false }
+wgnx-core = { path = "crates/wgnx-core", default-features = false }
 chacha20poly1305 = { version = "0.10", default-features = false, features = ["alloc"] }
 x25519-dalek = { version = "2", default-features = false, features = ["static_secrets", "zeroize"] }
 blake2 = { version = "0.10", default-features = false }

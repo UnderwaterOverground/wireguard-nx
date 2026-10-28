@@ -1,8 +1,8 @@
 {
-    "name": "tailscale-nx",
-    "program_id": "0x4200000000005453",
-    "program_id_range_min": "0x4200000000005453",
-    "program_id_range_max": "0x4200000000005453",
+    "name": "wireguard-nx",
+    "program_id": "0x4200000000005747",
+    "program_id_range_min": "0x4200000000005747",
+    "program_id_range_max": "0x4200000000005747",
     "main_thread_stack_size": "0xC000",
     "main_thread_priority": 42,
     "default_cpu_id": 3,

@@ -6,15 +6,15 @@
 #include "stack_watch.hpp"
 #include "status.hpp"
 
-#define TSNX_CTL_INTERFACE_INFO(C, H)                                                                                                    \
-    AMS_SF_METHOD_INFO(C, H, 0, Result, GetStatus,    (sf::Out<::TsnxCtlStatus> out),                       (out))                   \
+#define WGNX_CTL_INTERFACE_INFO(C, H)                                                                                                    \
+    AMS_SF_METHOD_INFO(C, H, 0, Result, GetStatus,    (sf::Out<::WgnxCtlStatus> out),                       (out))                   \
     AMS_SF_METHOD_INFO(C, H, 1, Result, GetLoginUrl,  (const sf::OutBuffer &url, sf::Out<u32> out_len),       (url, out_len))          \
     AMS_SF_METHOD_INFO(C, H, 2, Result, SetPaused,    (bool paused),                                          (paused))                \
     AMS_SF_METHOD_INFO(C, H, 3, Result, GetLastError, (const sf::OutBuffer &msg, sf::Out<u32> out_len),       (msg, out_len))          \
     AMS_SF_METHOD_INFO(C, H, 4, Result, Stop,         (sf::Out<u32> out_code, sf::Out<u32> out_detail),       (out_code, out_detail))  \
     AMS_SF_METHOD_INFO(C, H, 5, Result, GetActivePeers, (const sf::OutBuffer &peers, sf::Out<u32> out_count),   (peers, out_count))
 
-AMS_SF_DEFINE_INTERFACE(ams::ctl, ICtl, TSNX_CTL_INTERFACE_INFO, 0x7473636C)
+AMS_SF_DEFINE_INTERFACE(ams::ctl, ICtl, WGNX_CTL_INTERFACE_INFO, 0x7767636C)
 
 namespace ams::ctl {
 
@@ -26,7 +26,7 @@ namespace ams::ctl {
 
     class CtlService {
         public:
-            Result GetStatus(sf::Out<::TsnxCtlStatus> out) {
+            Result GetStatus(sf::Out<::WgnxCtlStatus> out) {
                 out.SetValue(status::Get());
                 R_SUCCEED();
             }
@@ -50,13 +50,13 @@ namespace ams::ctl {
 
             Result Stop(sf::Out<u32> out_code, sf::Out<u32> out_detail) {
                 u32 detail = 0;
-                out_code.SetValue(g_stop ? g_stop(std::addressof(detail)) : static_cast<u32>(TSNX_CTL_STOP_BUSY));
+                out_code.SetValue(g_stop ? g_stop(std::addressof(detail)) : static_cast<u32>(WGNX_CTL_STOP_BUSY));
                 out_detail.SetValue(detail);
                 R_SUCCEED();
             }
 
             Result GetActivePeers(const sf::OutBuffer &peers, sf::Out<u32> out_count) {
-                const size_t n = status::GetActivePeers(reinterpret_cast<::TsnxCtlPeer *>(peers.GetPointer()), peers.GetSize() / sizeof(::TsnxCtlPeer));
+                const size_t n = status::GetActivePeers(reinterpret_cast<::WgnxCtlPeer *>(peers.GetPointer()), peers.GetSize() / sizeof(::WgnxCtlPeer));
                 out_count.SetValue(static_cast<u32>(n));
                 R_SUCCEED();
             }
@@ -65,7 +65,7 @@ namespace ams::ctl {
 
     namespace {
 
-        constexpr sm::ServiceName CtlServiceName = sm::ServiceName::Encode(TSNX_CTL_SERVICE);
+        constexpr sm::ServiceName CtlServiceName = sm::ServiceName::Encode(WGNX_CTL_SERVICE);
         constexpr size_t MaxSessions = 4;
 
         sf::hipc::ServerManager<1, sf::hipc::DefaultServerManagerOptions, MaxSessions> g_server_manager;
@@ -93,7 +93,7 @@ namespace ams::ctl {
             os::SleepThread(TimeSpan::FromMilliSeconds(100));
         }
         if (R_FAILED(rc)) {
-            Log("ctl: registering %s failed: 0x%x", TSNX_CTL_SERVICE, rc.GetValue());
+            Log("ctl: registering %s failed: 0x%x", WGNX_CTL_SERVICE, rc.GetValue());
             return false;
         }
         stack_watch::Paint(g_thread_stack, sizeof g_thread_stack);
@@ -102,7 +102,7 @@ namespace ams::ctl {
             Log("ctl: cannot create thread");
             return false;
         }
-        os::SetThreadNamePointer(std::addressof(g_thread), "tsnx.Ctl");
+        os::SetThreadNamePointer(std::addressof(g_thread), "wgnx.Ctl");
         stack_watch::Add("ctl", std::addressof(g_thread));
         os::StartThread(std::addressof(g_thread));
         return true;

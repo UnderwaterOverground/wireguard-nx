@@ -1,6 +1,6 @@
-# Setting up tailscale-nx
+# Setting up wireguard-nx
 
-tailscale-nx puts a modded Switch on your [Tailscale](https://tailscale.com)
+wireguard-nx puts a modded Switch on your [Tailscale](https://tailscale.com)
 tailnet. It runs in the background from boot. Homebrew such as Moonlight can
 then reach your other devices by their `100.x` addresses or tailnet names,
 from anywhere.
@@ -27,9 +27,9 @@ card, adding them to the folders already there:
 
 | Path | What |
 |---|---|
-| `atmosphere/contents/4200000000005453/` | The sysmodule. `flags/boot2.flag` makes it start at boot. |
-| `switch/.overlays/tailscale-nx.ovl` | The overlay: status, the connections in use, a pause switch, stop and start, and the login QR code |
-| `config/tailscale-nx/config.ini.example` | Settings template (optional; see below) |
+| `atmosphere/contents/4200000000005747/` | The sysmodule. `flags/boot2.flag` makes it start at boot. |
+| `switch/.overlays/wireguard-nx.ovl` | The overlay: status, the connections in use, a pause switch, stop and start, and the login QR code |
+| `config/wireguard-nx/config.ini.example` | Settings template (optional; see below) |
 
 Then restart the console.
 
@@ -48,7 +48,7 @@ Pick one of two ways.
 4. The overlay changes to **Connected** and shows the Switch's `100.x`
    address.
 
-The link is also saved to `config/tailscale-nx/login.txt` on the SD card, in
+The link is also saved to `config/wireguard-nx/login.txt` on the SD card, in
 case you don't use Ultrahand.
 
 ### B. Use an auth key (nothing to do on the console)
@@ -64,7 +64,7 @@ case you don't use Ultrahand.
      doesn't limit the Switch once the Switch is added.
    - **Tags:** optional. Tagged devices have key expiry turned off by
      default, but you need a tag your account is allowed to use.
-3. Copy `config/tailscale-nx/config.ini.example` to `config.ini` in the same
+3. Copy `config/wireguard-nx/config.ini.example` to `config.ini` in the same
    folder, and set `auth_key=tskey-auth-…`.
 4. Restart the console.
 
@@ -82,7 +82,7 @@ easy to forget about, so turn expiry off for it:
    find the Switch (default name `nintendo-switch`).
 2. Open its **⋯** menu and choose **Disable key expiry**.
 
-If the key does expire, tailscale-nx handles it the way Tailscale's own
+If the key does expire, wireguard-nx handles it the way Tailscale's own
 clients do. It makes a new key and registers it in place of the old one:
 
 - **With a reusable auth key in `config.ini`** that is still valid, it
@@ -102,7 +102,7 @@ Until either happens, the Switch can't reach the tailnet.
   update when your tailnet changes.
   - Atmosphère's Nintendo blocking is left alone, and names containing
     "nintendo" are never added.
-  - If there's no hosts file, MagicDNS stays off. tailscale-nx never creates
+  - If there's no hosts file, MagicDNS stays off. wireguard-nx never creates
     one.
 - **Connected notice:** after each boot, a 5-second toast shows
   "Connected. IP: 100.x.y.z" the first time the Switch connects. It doesn't
@@ -111,7 +111,7 @@ Until either happens, the Switch can't reach the tailnet.
 - **Taildrop:** send files to the Switch from your other devices (see
   [below](#taildrop)).
 - **Update notice:** after each boot, 10 seconds after it connects,
-  tailscale-nx asks GitHub for the latest release. If it's newer than the
+  wireguard-nx asks GitHub for the latest release. If it's newer than the
   installed one, a 10-second toast says so. If GitHub can't be reached, nothing happens (the
   reason is in `sysmodule.log`). This request shows GitHub the console's
   public IP address, as any web request does. Nothing else is sent. Turn
@@ -124,18 +124,18 @@ Until either happens, the Switch can't reach the tailnet.
   see [Moonlight is slow away from home](#troubleshooting).
 - **Pause:** use the **Tailscale** switch in the overlay. While paused,
   tailnet connections fail at once and everything else works normally.
-- **Stop and start:** **Stop tailscale-nx** in the overlay ends the
+- **Stop and start:** **Stop wireguard-nx** in the overlay ends the
   sysmodule and frees its memory, until the next boot or until you press
-  **Start tailscale-nx**. Its boot setting doesn't change.
+  **Start wireguard-nx**. Its boot setting doesn't change.
   - Close homebrew apps first. Stop is refused while one has sockets through
-    tailscale-nx, because closing them would break the app. It's also
+    wireguard-nx, because closing them would break the app. It's also
     refused for a moment around sleep and wake.
   - With `mitm=homebrew,sys-ftpd`, stopping restarts sys-ftpd, which drops
     any FTP connection.
   - Start works whether or not the boot setting is on, but not while
-    `config/tailscale-nx/disabled` exists.
+    `config/wireguard-nx/disabled` exists.
 - **Turn it off completely:** in the **Sysmodules** overlay
-  (ovl-sysmodules), turn off tailscale-nx's boot setting, then use **Stop**
+  (ovl-sysmodules), turn off wireguard-nx's boot setting, then use **Stop**
   or restart. The Sysmodules overlay can't stop it itself: Atmosphère would
   freeze if its socket hook disappeared without being removed first.
 
@@ -180,14 +180,14 @@ Tailscale. This is on by default (`accept_routes=off` turns it off).
 
 ## Access rules
 
-tailscale-nx enforces your tailnet's
+wireguard-nx enforces your tailnet's
 [access rules](https://tailscale.com/kb/1018/acls) (ACLs) for connections
 coming in to the Switch, as every Tailscale device does. Something listening
 on the Switch, such as an FTP server, is reachable only from devices your
 rules allow. Connections the Switch makes are checked by the device they
 reach.
 
-## Settings (`config/tailscale-nx/config.ini`)
+## Settings (`config/wireguard-nx/config.ini`)
 
 All settings are optional. They take effect after a restart.
 
@@ -210,7 +210,7 @@ All settings are optional. They take effect after a restart.
 ### Home-screen forwarders
 
 Homebrew started from a home-screen forwarder runs as its own title, not
-through hbmenu. tailscale-nx still serves it when its title ID doesn't start
+through hbmenu. wireguard-nx still serves it when its title ID doesn't start
 with `01`, which is the case for forwarders made by the usual tools (their
 IDs mostly start with `05`); Nintendo's games and apps all start with `01`.
 
@@ -232,10 +232,10 @@ this off.
 
 With `mitm=homebrew,sys-ftpd`, the sys-ftpd sysmodule is also reachable on
 the Switch's tailnet address or name, e.g. `ftp://nintendo-switch:5000`.
-This costs about 70 KB more memory, and tailscale-nx restarts sys-ftpd once
+This costs about 70 KB more memory, and wireguard-nx restarts sys-ftpd once
 at boot to take it over. FTP on the local network keeps working as before.
 
-sys-ftpd itself has two limits, with or without tailscale-nx:
+sys-ftpd itself has two limits, with or without wireguard-nx:
 - **Speed:** about 11–14 Mbit/s on the local network and 5–7 Mbit/s over
   the tailnet.
 - **Back-to-back transfers:** after two large transfers in a row, it refuses
@@ -251,7 +251,7 @@ to `mitm=homebrew`.
 
 ## Memory
 
-tailscale-nx uses exactly **2.5 MB** of the memory the system sets aside for
+wireguard-nx uses exactly **2.5 MB** of the memory the system sets aside for
 sysmodules, taken once when it starts. It never grows or shrinks: about
 1 MB of code and 1.5 MB of data, including a fixed heap of about 820 KB. Busy tailnet
 sockets use more of that heap, up to the `overlay_budget_kb` limit.
@@ -263,7 +263,7 @@ sockets use more of that heap, up to the `overlay_budget_kb` limit.
   - This is the room left under the system's limit for sysmodules, the
     figure those crashes depend on. Other overlays, such as Sysmodules, may
     show a higher figure: they count unused memory instead.
-- At boot tailscale-nx starts before most other sysmodules, so it can't
+- At boot wireguard-nx starts before most other sysmodules, so it can't
   tell yet how much they will leave. It watches for the first two minutes:
   if less than 512 KB was ever free, it says so in a notification (with
   Ultrahand) and in the log, and the overlay's memory line turns red while
@@ -274,23 +274,23 @@ sockets use more of that heap, up to the `overlay_budget_kb` limit.
 ## Troubleshooting
 
 - **The overlay says the sysmodule isn't running.**
-  - Check that `atmosphere/contents/4200000000005453/flags/boot2.flag`
+  - Check that `atmosphere/contents/4200000000005747/flags/boot2.flag`
     exists.
-  - If `config/tailscale-nx/crashed` exists, tailscale-nx turned itself off.
+  - If `config/wireguard-nx/crashed` exists, wireguard-nx turned itself off.
     It does this after 3 boots in a row that ended within 3 minutes, or 2
     sleeps the console never woke from. The file says which. **Turn back on**
-    in the overlay deletes it and starts tailscale-nx again.
-  - If `config/tailscale-nx/disabled` exists, delete it.
+    in the overlay deletes it and starts wireguard-nx again.
+  - If `config/wireguard-nx/disabled` exists, delete it.
 - **The overlay says "Reconnecting..." or "No internet connection."**
   - The Switch lost its internet connection, or can't reach Tailscale's
-    server. tailscale-nx keeps trying and reconnects on its own. On hotel or
+    server. wireguard-nx keeps trying and reconnects on its own. On hotel or
     café Wi-Fi, sign in to the network first. If it stays like this, the
     overlay shows the last error.
 - **The overlay says "Not responding".**
-  - tailscale-nx has stopped answering. Restart the console, and send us
+  - wireguard-nx has stopped answering. Restart the console, and send us
     `sysmodule.log.1` (the boot before the restart).
 - **What happened?**
-  - The log is in `config/tailscale-nx/sysmodule.log`, and the previous
+  - The log is in `config/wireguard-nx/sysmodule.log`, and the previous
     boot's log is in `sysmodule.log.1`.
   - To watch it live, set `log_udp` to a computer's address.
 - **An app reports "no buffer space" (errno 105).**
@@ -305,5 +305,5 @@ sockets use more of that heap, up to the `overlay_budget_kb` limit.
     address, and that the overlay shows **Connected**.
 
 Still stuck? Ask on [Discord](https://discord.gg/GjUuBEqRYb) or
-[open an issue](https://github.com/UnderwaterOverground/tailscale-nx/issues),
+[open an issue](https://github.com/UnderwaterOverground/wireguard-nx/issues),
 with your `sysmodule.log`.

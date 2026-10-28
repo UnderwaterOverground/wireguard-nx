@@ -1,4 +1,4 @@
-// Runs a tsnx engine on its own thread and lets other threads use it.
+// Runs a wgnx engine on its own thread and lets other threads use it.
 //
 // The engine and driver are not thread-safe; everything goes through one
 // mutex, which the engine thread drops only while blocked in poll(). Callers
@@ -18,16 +18,16 @@
 #include <string>
 #include <thread>
 
-#include "tsnx.h"
-#include "tsnx_driver.h"
-#include "tsnx_drop.h"
+#include "wgnx.h"
+#include "wgnx_driver.h"
+#include "wgnx_drop.h"
 
-namespace tsnx {
+namespace wgnx {
 
 struct RuntimeConfig {
     std::string control_url;
     std::string auth_key;
-    std::string hostname = "tailscale-nx";
+    std::string hostname = "wireguard-nx";
     std::string state_path;
     std::string extra_root_path;  // optional DER root certificate
     std::string connect_map;      // optional dev address rewrites
@@ -39,27 +39,27 @@ struct RuntimeConfig {
     // the engine).
     bool accept_routes = false;
     // Called on the engine thread with the lock held; must not call back in.
-    std::function<void(const TsnxEvent &)> on_event;
+    std::function<void(const WgnxEvent &)> on_event;
 };
 
 class Runtime {
 public:
     using Clock = std::chrono::steady_clock;
 
-#ifndef TSNX_NO_STDIO
+#ifndef WGNX_NO_STDIO
     static std::unique_ptr<Runtime> Start(RuntimeConfig cfg, std::string *error);
 #endif
     // Wraps an engine/driver the caller set up (and keeps owning); the
     // caller then runs Run() on a thread of its own. Events go to the
-    // callback the caller gave tsnx_driver_new.
-    static std::unique_ptr<Runtime> Adopt(TsnxEngine *engine, TsnxDriver *driver, std::string *error);
+    // callback the caller gave wgnx_driver_new.
+    static std::unique_ptr<Runtime> Adopt(WgnxEngine *engine, WgnxDriver *driver, std::string *error);
     // The engine loop, for Adopt()ed runtimes. on_tick runs with the lock held
     // (it may use the driver), at least once a second and at most every 50 ms.
     // after_tick, if given, runs right after each on_tick on the same thread
     // with the lock released, for slow work that doesn't touch the engine
     // (files, other services), which would keep callers waiting.
     // Returns after Stop().
-    void Run(const std::function<void(TsnxDriver *)> &on_tick, const std::function<void()> &after_tick = nullptr);
+    void Run(const std::function<void(WgnxDriver *)> &on_tick, const std::function<void()> &after_tick = nullptr);
     void Stop();
 
     // Suspend() has the loop close every socket the engine and the runtime
@@ -94,7 +94,7 @@ public:
 
     // Runs f(engine) with exclusive access, then performs the I/O it queued.
     template <class F>
-    auto With(F &&f) -> decltype(f(static_cast<TsnxEngine *>(nullptr))) {
+    auto With(F &&f) -> decltype(f(static_cast<WgnxEngine *>(nullptr))) {
         // The loop first: a caller making call after call would otherwise
         // take the lock back before the loop thread runs, and the engine's
         // own socket (incoming datagrams, replies) would go unread. Callers
@@ -117,7 +117,7 @@ public:
     // queued datagram): nothing for the engine to send afterwards, so no
     // pump and no wake-up.
     template <class F>
-    auto Read(F &&f) -> decltype(f(static_cast<TsnxEngine *>(nullptr))) {
+    auto Read(F &&f) -> decltype(f(static_cast<WgnxEngine *>(nullptr))) {
         if (loop_wants_lock_.load(std::memory_order_acquire)) WaitForLoop();
         std::unique_lock<std::mutex> lock(mu_);
         InternalScope internal;
@@ -126,7 +126,7 @@ public:
 
     // Blocks until ready(engine) returns true or the deadline passes
     // (nullptr = no deadline). Returns ready()'s final value.
-    bool WaitFor(const std::function<bool(TsnxEngine *)> &ready, const Clock::time_point *deadline);
+    bool WaitFor(const std::function<bool(WgnxEngine *)> &ready, const Clock::time_point *deadline);
 
     // Wakes all waiters (e.g. a socket was closed under them).
     void NotifyAll() { cv_.notify_all(); }
@@ -137,7 +137,7 @@ public:
 
 private:
     Runtime() = default;
-    void Loop(const std::function<void(TsnxDriver *)> *on_tick, const std::function<void()> *after_tick);
+    void Loop(const std::function<void(WgnxDriver *)> *on_tick, const std::function<void()> *after_tick);
     void AfterCall();
     void Wake();
 
@@ -150,8 +150,8 @@ private:
     RuntimeConfig cfg_;
     std::mutex mu_;
     std::condition_variable cv_;
-    TsnxEngine *engine_ = nullptr;
-    TsnxDriver *driver_ = nullptr;
+    WgnxEngine *engine_ = nullptr;
+    WgnxDriver *driver_ = nullptr;
     bool owned_ = true;  // engine/driver freed by the destructor
     std::thread thread_;
     bool stop_ = false;
@@ -166,7 +166,7 @@ private:
     bool suspended_ = false;
     int wake_rx_ = -1, wake_tx_ = -1;
     // While the loop is in poll() (it dropped the lock): until when it
-    // waits at most (tsnx_driver_now_ns).
+    // waits at most (wgnx_driver_now_ns).
     bool polling_ = false;
     uint64_t poll_until_ns_ = 0;
     // Set (under gate_mu_) while the loop, back from poll(), waits for the
@@ -175,7 +175,7 @@ private:
     std::mutex gate_mu_;
     std::condition_variable gate_cv_;
     void WaitForLoop();
-    std::unique_ptr<TsnxDropDir> drop_;  // Taildrop folder state (Start())
+    std::unique_ptr<WgnxDropDir> drop_;  // Taildrop folder state (Start())
 };
 
-}  // namespace tsnx
+}  // namespace wgnx

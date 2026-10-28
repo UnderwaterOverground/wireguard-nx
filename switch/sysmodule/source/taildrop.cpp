@@ -6,7 +6,7 @@
 #include "log.hpp"
 #include "status.hpp"
 #include "taildrop.hpp"
-#include "tsnx_drop.h"
+#include "wgnx_drop.h"
 
 namespace ams::taildrop {
 
@@ -18,7 +18,7 @@ namespace ams::taildrop {
         // as one file, like installed games on FAT32 cards).
         constexpr u64 BigFileFrom = 0xFFFFFFFFull;
 
-        // One transfer at a time (tsnx_drop.h), so one handle.
+        // One transfer at a time (wgnx_drop.h), so one handle.
         constinit fs::FileHandle g_file = {};
         constinit bool g_open = false;
 
@@ -80,9 +80,9 @@ namespace ams::taildrop {
 
         int Remove(const char *path) { return R_SUCCEEDED(fs::DeleteFile(path)) ? 0 : -1; }
 
-        constexpr TsnxFs SdFs = {Kind, MakeDir, Space, Create, Write, Close, Rename, Remove};
+        constexpr WgnxFs SdFs = {Kind, MakeDir, Space, Create, Write, Close, Rename, Remove};
 
-        constinit TsnxDropDir g_dir = {};
+        constinit WgnxDropDir g_dir = {};
 
         void OnResult(void *, int saved, const char *name, uint64_t bytes, const char *from, const char *why) {
             if (saved) {
@@ -99,7 +99,7 @@ namespace ams::taildrop {
             for (int round = 0; round < 16; round++) {
                 fs::DirectoryHandle dir;
                 if (R_FAILED(fs::OpenDirectory(std::addressof(dir), Dir, fs::OpenDirectoryMode_File))) return;
-                char path[TSNX_DROP_PATH_MAX] = {};
+                char path[WGNX_DROP_PATH_MAX] = {};
                 fs::DirectoryEntry entry;
                 s64 got = 0;
                 while (R_SUCCEEDED(fs::ReadDirectory(std::addressof(got), std::addressof(entry), dir, 1)) && got == 1) {
@@ -118,10 +118,10 @@ namespace ams::taildrop {
 
     }
 
-    bool Start(TsnxDriver *driver) {
+    bool Start(WgnxDriver *driver) {
         RemoveStalePartials();
-        const TsnxDropSink sink = tsnx_drop_dir(std::addressof(g_dir), std::addressof(SdFs), Dir, OnResult, nullptr);
-        if (tsnx_driver_set_taildrop(driver, std::addressof(sink), Port) != 0) {
+        const WgnxDropSink sink = wgnx_drop_dir(std::addressof(g_dir), std::addressof(SdFs), Dir, OnResult, nullptr);
+        if (wgnx_driver_set_taildrop(driver, std::addressof(sink), Port) != 0) {
             Log("taildrop: cannot listen on port %u", Port);
             return false;
         }

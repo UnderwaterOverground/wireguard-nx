@@ -1,11 +1,11 @@
-// tailscale-nx sysmodule: runs the Tailscale engine from boot (boot2), so the
+// wireguard-nx sysmodule: runs the Tailscale engine from boot (boot2), so the
 // console is on the tailnet without any app open.
 //
 // It also MITMs bsd:u for homebrew (bsd_mitm.cpp), so their sockets reach
 // tailnet addresses through the engine (mitm=off in config.ini disables that).
 //
 // Files (SD card):
-//   config/tailscale-nx/config.ini   shared with the app (control_url, auth_key,
+//   config/wireguard-nx/config.ini   shared with the app (control_url, auth_key,
 //                                    hostname, ca_cert, log_udp=<ip>:<port>,
 //                                    mitm=homebrew|homebrew,sys-ftpd|off,
 //                                    mitm_titles=<program IDs>,
@@ -13,15 +13,15 @@
 //                                    overlay_budget_kb=<128..384>,
 //                                    connect_notice=on|off, taildrop=on|off,
 //                                    accept_routes=on|off, update_check=on|off)
-//   config/tailscale-nx/state        node keys, shared with the app
-//   config/tailscale-nx/disabled     kill switch: if present, exit at boot
-//   config/tailscale-nx/no-update-check  the overlay's update check switch (off)
-//   config/tailscale-nx/crashed      written after 3 boots in a row that ended
+//   config/wireguard-nx/state        node keys, shared with the app
+//   config/wireguard-nx/disabled     kill switch: if present, exit at boot
+//   config/wireguard-nx/no-update-check  the overlay's update check switch (off)
+//   config/wireguard-nx/crashed      written after 3 boots in a row that ended
 //                                    within 3 minutes, or 2 sleeps that never woke;
 //                                    keeps it off (delete to retry)
-//   config/tailscale-nx/start_requested  written by the overlay just before it
+//   config/wireguard-nx/start_requested  written by the overlay just before it
 //                                    starts us (its system tick): not a boot start
-//   config/tailscale-nx/sysmodule.log (+ .1 from the previous boot)
+//   config/wireguard-nx/sysmodule.log (+ .1 from the previous boot)
 #include <stratosphere.hpp>
 
 #include <arpa/inet.h>
@@ -38,11 +38,11 @@
 
 extern "C" {
 #include <switch/services/bsd.h>
-#include "tsnx.h"
-#include "tsnx_app.h"
-#include "tsnx_dns.h"
-#include "tsnx_driver.h"
-#include "tsnx_update.h"
+#include "wgnx.h"
+#include "wgnx_app.h"
+#include "wgnx_dns.h"
+#include "wgnx_driver.h"
+#include "wgnx_update.h"
 }
 
 #include <memory>
@@ -64,24 +64,24 @@ namespace ams {
 
     namespace {
 
-        constexpr const char ConfigDir[] = "sdmc:/config/tailscale-nx";
-        constexpr const char ConfigPath[] = "sdmc:/config/tailscale-nx/config.ini";
-        constexpr const char StatePath[] = "sdmc:/config/tailscale-nx/state";
-        constexpr const char DisabledPath[] = "sdmc:/config/tailscale-nx/disabled";
+        constexpr const char ConfigDir[] = "sdmc:/config/wireguard-nx";
+        constexpr const char ConfigPath[] = "sdmc:/config/wireguard-nx/config.ini";
+        constexpr const char StatePath[] = "sdmc:/config/wireguard-nx/state";
+        constexpr const char DisabledPath[] = "sdmc:/config/wireguard-nx/disabled";
         // Why we didn't start this time (too little system memory), for the
         // overlay; removed once we do start.
-        constexpr const char NotStartedPath[] = "sdmc:/config/tailscale-nx/not_started";
+        constexpr const char NotStartedPath[] = "sdmc:/config/wireguard-nx/not_started";
         // System memory left for everything launched after us: Nintendo
         // starts some modules on demand, and they fail without it.
         constexpr u64 MinSystemFree = 1_MB;
         // How long after our start to watch the system's free memory (boot
         // and the HOME menu starting), for the log and a low-memory warning.
         constexpr u64 BootLowWindowNs = 120'000'000'000ull;
-        constexpr const char CrashedPath[] = "sdmc:/config/tailscale-nx/crashed";
-        constexpr const char StartingPath[] = "sdmc:/config/tailscale-nx/starting";
-        constexpr const char SleepingPath[] = "sdmc:/config/tailscale-nx/sleeping";
-        constexpr const char SleepFailuresPath[] = "sdmc:/config/tailscale-nx/sleep_failures";
-        constexpr const char StartRequestedPath[] = "sdmc:/config/tailscale-nx/start_requested";
+        constexpr const char CrashedPath[] = "sdmc:/config/wireguard-nx/crashed";
+        constexpr const char StartingPath[] = "sdmc:/config/wireguard-nx/starting";
+        constexpr const char SleepingPath[] = "sdmc:/config/wireguard-nx/sleeping";
+        constexpr const char SleepFailuresPath[] = "sdmc:/config/wireguard-nx/sleep_failures";
+        constexpr const char StartRequestedPath[] = "sdmc:/config/wireguard-nx/start_requested";
         // How old the overlay's start request may be (pm launches at once).
         constexpr u64 StartRequestFreshNs = 30'000'000'000ull;
         // A boot that doesn't last HealthyAfterNs counts against us (the
@@ -92,8 +92,8 @@ namespace ams {
         constexpr u64 HealthyAfterNs = 180'000'000'000ull;
         constexpr u64 BootStartWithinNs = 120'000'000'000ull;
         constexpr int MaxSleepFailures = 2;
-        constexpr const char LogPath[] = "sdmc:/config/tailscale-nx/sysmodule.log";
-        constexpr const char OldLogPath[] = "sdmc:/config/tailscale-nx/sysmodule.log.1";
+        constexpr const char LogPath[] = "sdmc:/config/wireguard-nx/sysmodule.log";
+        constexpr const char OldLogPath[] = "sdmc:/config/wireguard-nx/sysmodule.log.1";
         constexpr s64 LogMaxSize = 512_KB;
 
         // Heap for the engine (Rust core + driver) and our own allocations,
@@ -101,7 +101,7 @@ namespace ams {
         // (heap_size.h). Measured on the console: everything peaked at
         // 629 KB with the default 320 KB overlay budget (a Moonlight
         // connection burst).
-        constexpr size_t MallocBufferSize = TSNX_HEAP_SIZE;
+        constexpr size_t MallocBufferSize = WGNX_HEAP_SIZE;
         static_assert(MallocBufferSize % os::MemoryPageSize == 0);
         alignas(os::MemoryPageSize) constinit u8 g_malloc_buffer[MallocBufferSize];
 
@@ -111,7 +111,7 @@ namespace ams {
         // buffers are taken from it, and one that doesn't fit fails with
         // ENOBUFS. UDP sockets start with a small receive buffer, as only
         // WireGuard's needs to be big, and it grows its own
-        // (tsnx_driver.c): at 48 KB each, the small sockets took so much
+        // (wgnx_driver.c): at 48 KB each, the small sockets took so much
         // that once WireGuard had grown, a new DNS socket didn't fit, and
         // after a pause or a wake the engine couldn't reach control. The
         // pool keeps the size it had with 48 KB (sb_efficiency sockets'
@@ -409,12 +409,12 @@ namespace ams {
             return WriteKeys(machine, node, disco);
         }
 
-        // The engine replaced our expired node key (TSNX_EVENT_NODE_KEY): store
+        // The engine replaced our expired node key (WGNX_EVENT_NODE_KEY): store
         // it, or the next boot would come back with the expired one.
-        void SaveNodeKey(TsnxEngine *engine) {
+        void SaveNodeKey(WgnxEngine *engine) {
             u8 machine[32], node[32], disco[32];
             if (!LoadOrCreateKeys(machine, node, disco)) return;
-            tsnx_engine_node_key(engine, node);
+            wgnx_engine_node_key(engine, node);
             if (!WriteKeys(machine, node, disco)) Log("cannot save the new node key to %s", StatePath);
         }
 
@@ -456,7 +456,7 @@ namespace ams {
                 const u64 now = armTicksToNs(armGetSystemTick());
                 if (now >= deadline) break;
                 const int timeout_ms = static_cast<int>(std::min<u64>(1500, (deadline - now) / 1'000'000));
-                if (tsnx_dns_query_a(servers[i], host, out, timeout_ms) == 0) return 0;
+                if (wgnx_dns_query_a(servers[i], host, out, timeout_ms) == 0) return 0;
                 Log("dns: %s via %s failed: errno %d", host, inet_ntoa(in_addr{servers[i]}), errno);
             }
             return -1;
@@ -474,13 +474,13 @@ namespace ams {
             if (ip && R_SUCCEEDED(nifmGetCurrentIpConfigInfo(&cur, &mask, &gw, &dns1, &dns2)) && cur == ip) {
                 len = static_cast<unsigned>(__builtin_popcount(mask));
             }
-            ::tsnx::VSock::SetLocalNet(ntohl(ip), len);
+            ::wgnx::VSock::SetLocalNet(ntohl(ip), len);
         }
 
         // The network clock if synced, else the user clock.
         u64 ConsoleUnixTime() {
             u64 t = 0;
-            if (R_SUCCEEDED(timeGetCurrentTime(TimeType_NetworkSystemClock, &t)) && t > static_cast<u64>(TSNX_BUILD_UNIX)) return t;
+            if (R_SUCCEEDED(timeGetCurrentTime(TimeType_NetworkSystemClock, &t)) && t > static_cast<u64>(WGNX_BUILD_UNIX)) return t;
             if (R_SUCCEEDED(timeGetCurrentTime(TimeType_UserSystemClock, &t))) return t;
             return 0;
         }
@@ -491,14 +491,14 @@ namespace ams {
         // is gone), or a minute after starting if it doesn't connect: a newer
         // release on GitHub gets a toast. Failures are only logged. Off with
         // update_check=off or the overlay's switch.
-        constexpr const char NoUpdateCheckPath[] = "sdmc:/config/tailscale-nx/no-update-check";
+        constexpr const char NoUpdateCheckPath[] = "sdmc:/config/wireguard-nx/no-update-check";
         constexpr u64 UpdateCheckAfterConnectNs = 10'000'000'000ull;
         constexpr u64 UpdateCheckLatestNs = 60'000'000'000ull;
         constexpr u32 UpdateCheckTimeoutMs = 30'000;
 
         constinit bool g_update_check = false;  // still to do this boot
         constinit u64 g_update_check_at_ns = 0;  // 0: counted from the next tick
-        constinit TsnxUpdate *g_update = nullptr;
+        constinit WgnxUpdate *g_update = nullptr;
 
         // Engine loop, runtime lock held. Only the start blocks (DNS lookup).
         void StepUpdateCheck(u64 now) {
@@ -516,24 +516,24 @@ namespace ams {
                     g_update_check = false;
                     return;
                 }
-                g_update = tsnx_update_start(TSNX_UPDATE_REPO, tsnx_version(), tsnx_driver_now_ns(), UpdateCheckTimeoutMs);
+                g_update = wgnx_update_start(WGNX_UPDATE_REPO, wgnx_version(), wgnx_driver_now_ns(), UpdateCheckTimeoutMs);
                 if (!g_update) {
                     Log("update check: out of memory");
                     g_update_check = false;
                     return;
                 }
             }
-            const int r = tsnx_update_step(g_update, tsnx_driver_now_ns());
-            if (r == TSNX_UPDATE_PENDING) return;
-            if (r == TSNX_UPDATE_NEWER) {
-                Log("update check: %s is available (this is %s)", tsnx_update_latest(g_update), tsnx_version());
-                status::AnnounceUpdate(tsnx_update_latest(g_update));
-            } else if (r == TSNX_UPDATE_CURRENT) {
-                Log("update check: up to date (latest release %s)", tsnx_update_latest(g_update));
+            const int r = wgnx_update_step(g_update, wgnx_driver_now_ns());
+            if (r == WGNX_UPDATE_PENDING) return;
+            if (r == WGNX_UPDATE_NEWER) {
+                Log("update check: %s is available (this is %s)", wgnx_update_latest(g_update), wgnx_version());
+                status::AnnounceUpdate(wgnx_update_latest(g_update));
+            } else if (r == WGNX_UPDATE_CURRENT) {
+                Log("update check: up to date (latest release %s)", wgnx_update_latest(g_update));
             } else {
-                Log("update check failed: %s", tsnx_update_error(g_update));
+                Log("update check failed: %s", wgnx_update_error(g_update));
             }
-            tsnx_update_free(g_update);
+            wgnx_update_free(g_update);
             g_update = nullptr;
             g_update_check = false;
         }
@@ -542,7 +542,7 @@ namespace ams {
         // again a while after resuming.
         void SuspendUpdateCheck() {
             if (g_update) {
-                tsnx_update_free(g_update);
+                wgnx_update_free(g_update);
                 g_update = nullptr;
                 Log("update check: interrupted; trying again after resuming");
             }
@@ -553,23 +553,23 @@ namespace ams {
         // in the log and a toast.
         void WatchBootMemory(u64 now_ns) {
             u64 low = 0;
-            if (!memory::SampleBootLow(now_ns, BootLowWindowNs, &low) || low >= TSNX_CTL_LOW_SYSTEM_FREE_KB * 1024ull) return;
-            Log("WARN memory: under %u KB free: modules started later can fail (2001-0132)", TSNX_CTL_LOW_SYSTEM_FREE_KB);
+            if (!memory::SampleBootLow(now_ns, BootLowWindowNs, &low) || low >= WGNX_CTL_LOW_SYSTEM_FREE_KB * 1024ull) return;
+            Log("WARN memory: under %u KB free: modules started later can fail (2001-0132)", WGNX_CTL_LOW_SYSTEM_FREE_KB);
             status::AnnounceLowMemory(static_cast<u32>(low / 1024));
         }
 
         const char *EventName(u32 kind) {
             switch (kind) {
-                case TSNX_EVENT_LOGIN_URL: return "login-url";
-                case TSNX_EVENT_AUTHORIZED: return "authorized";
-                case TSNX_EVENT_ADDRESSES: return "addresses";
-                case TSNX_EVENT_PEERS: return "peers";
-                case TSNX_EVENT_HOME_DERP: return "home-derp";
-                case TSNX_EVENT_ERROR: return "error";
-                case TSNX_EVENT_ENDPOINTS: return "endpoints";
-                case TSNX_EVENT_PEER_PATH: return "path";
-                case TSNX_EVENT_NODE_KEY: return "node-key";
-                case TSNX_EVENT_CONTROL: return "control";
+                case WGNX_EVENT_LOGIN_URL: return "login-url";
+                case WGNX_EVENT_AUTHORIZED: return "authorized";
+                case WGNX_EVENT_ADDRESSES: return "addresses";
+                case WGNX_EVENT_PEERS: return "peers";
+                case WGNX_EVENT_HOME_DERP: return "home-derp";
+                case WGNX_EVENT_ERROR: return "error";
+                case WGNX_EVENT_ENDPOINTS: return "endpoints";
+                case WGNX_EVENT_PEER_PATH: return "path";
+                case WGNX_EVENT_NODE_KEY: return "node-key";
+                case WGNX_EVENT_CONTROL: return "control";
                 default: return "log";
             }
         }
@@ -601,12 +601,12 @@ namespace ams {
         // Sends queued log lines through the tunnel (engine loop, runtime lock
         // held). Waits while we're not on the tailnet; lines from boot are
         // kept (the oldest dropped if the queue fills).
-        void FlushTailnetLog(TsnxEngine *engine) {
+        void FlushTailnetLog(WgnxEngine *engine) {
             static int32_t udp = 0;
             static char out[sizeof g_tailnet_log];
             if (!g_log_tailnet) return;
-            const TsnxCtlStatus st = status::Get();
-            if (st.state == TSNX_CTL_PAUSED || st.ipv4[0] == 0) return;
+            const WgnxCtlStatus st = status::Get();
+            if (st.state == WGNX_CTL_PAUSED || st.ipv4[0] == 0) return;
             if (armTicksToNs(armGetSystemTick()) < g_tailnet_log_hold_until_ns) return;
             size_t len;
             {
@@ -616,16 +616,16 @@ namespace ams {
                 std::memcpy(out, g_tailnet_log, len);
                 g_tailnet_log_len = 0;
             }
-            if (udp <= 0) udp = tsnx_net_udp_bind(engine, 0);
+            if (udp <= 0) udp = wgnx_net_udp_bind(engine, 0);
             if (udp <= 0) return;
-            TsnxAddr dst = {};
+            WgnxAddr dst = {};
             dst.family = 4;
             std::memcpy(dst.ip, &g_log_udp_addr.sin_addr.s_addr, 4);
             dst.port = ntohs(g_log_udp_addr.sin_port);
             for (size_t off = 0; off < len;) {
                 const char *nl = static_cast<const char *>(std::memchr(out + off, '\n', len - off));
                 const size_t n = (nl ? static_cast<size_t>(nl - (out + off)) : len - off) + (nl ? 1 : 0);
-                tsnx_net_udp_sendto(engine, udp, reinterpret_cast<const u8 *>(out + off), n, &dst);
+                wgnx_net_udp_sendto(engine, udp, reinterpret_cast<const u8 *>(out + off), n, &dst);
                 off += n;
             }
         }
@@ -673,11 +673,11 @@ namespace ams {
         // With our sockets open and in use across sleep, the transition
         // failed and omm aborted (2165-0001). So we take part in power-state
         // changes (psc) and close every socket we own on the way down.
-        constexpr auto TsnxPmModuleId = static_cast<psc::PmModuleId>(0x7453);
+        constexpr auto WgnxPmModuleId = static_cast<psc::PmModuleId>(0x7747);
         constexpr psc::PmModuleId PmDependencies[] = {psc::PmModuleId_Nifm, psc::PmModuleId_Fs};
 
         psc::PmModule g_pm_module;
-        constinit ::tsnx::Runtime *g_power_runtime = nullptr;
+        constinit ::wgnx::Runtime *g_power_runtime = nullptr;
         alignas(os::ThreadStackAlignment) constinit u8 g_power_thread_stack[0x2000];  // measured: ~1 KB
         constinit os::ThreadType g_power_thread;
         constinit bool g_power_running = false;  // registered with psc, thread started
@@ -720,7 +720,7 @@ namespace ams {
                     // A reboot or power-off (ShutdownReady) never wakes, so it
                     // must not count as a failed sleep.
                     if (state != psc::PmState_ShutdownReady) WriteWholeFile(SleepingPath, "1", 1);  // removed on wake; see PassesCrashGuard
-                    g_power_runtime->RequestSuspend(::tsnx::Runtime::kSleep);
+                    g_power_runtime->RequestSuspend(::wgnx::Runtime::kSleep);
                     const u64 deadline = armTicksToNs(armGetSystemTick()) + 2'500'000'000ull;
                     while (!g_power_runtime->IsSuspended() && armTicksToNs(armGetSystemTick()) < deadline) {
                         os::SleepThread(TimeSpan::FromMilliSeconds(10));
@@ -742,7 +742,7 @@ namespace ams {
                 if (suspended && (waking || state == psc::PmState_FullAwake)) wake_held_ns += armTicksToNs(armGetSystemTick()) - asked;
                 if (suspended && state == psc::PmState_FullAwake) {
                     g_log_udp_paused = false;
-                    g_power_runtime->Resume(::tsnx::Runtime::kSleep);
+                    g_power_runtime->Resume(::wgnx::Runtime::kSleep);
                     suspended = false;
                     static_cast<void>(fs::DeleteFile(SleepingPath));
                     static_cast<void>(fs::DeleteFile(SleepFailuresPath));
@@ -777,13 +777,13 @@ namespace ams {
 
         // Without psc, sleep with our sockets open makes omm abort (the
         // console restarts): false means don't run at all.
-        bool StartPowerHandling(::tsnx::Runtime &rt) {
+        bool StartPowerHandling(::wgnx::Runtime &rt) {
             g_power_runtime = std::addressof(rt);
             if (R_FAILED(::pscmInitialize())) {
                 Log("power: psc unavailable; not starting (sleep would fail)");
                 return false;
             }
-            if (const Result rc = g_pm_module.Initialize(TsnxPmModuleId, PmDependencies, util::size(PmDependencies), os::EventClearMode_AutoClear); R_FAILED(rc)) {
+            if (const Result rc = g_pm_module.Initialize(WgnxPmModuleId, PmDependencies, util::size(PmDependencies), os::EventClearMode_AutoClear); R_FAILED(rc)) {
                 Log("power: psc module registration failed: 0x%x; not starting (sleep would fail)", rc.GetValue());
                 return false;
             }
@@ -795,7 +795,7 @@ namespace ams {
                 static_cast<void>(g_pm_module.Finalize());
                 return false;
             }
-            os::SetThreadNamePointer(std::addressof(g_power_thread), "tsnx.Power");
+            os::SetThreadNamePointer(std::addressof(g_power_thread), "wgnx.Power");
             stack_watch::Add("power", std::addressof(g_power_thread));
             os::StartThread(std::addressof(g_power_thread));
             g_power_running = true;
@@ -879,7 +879,7 @@ namespace ams {
             Log("%s: disabling (see %s)", why, CrashedPath);
             char msg[256];
             const int n = util::SNPrintf(msg, sizeof msg,
-                                        "tailscale-nx stopped itself: %s.\n"
+                                        "wireguard-nx stopped itself: %s.\n"
                                         "See sysmodule.log / sysmodule.log.1. Delete this file to try again.\n", why);
             WriteWholeFile(CrashedPath, msg, n);
             static_cast<void>(fs::DeleteFile(StartingPath));
@@ -911,20 +911,20 @@ namespace ams {
 
     namespace {
 
-        constinit ::tsnx::Runtime *g_runtime = nullptr;
+        constinit ::wgnx::Runtime *g_runtime = nullptr;
         constinit std::atomic<bool> g_stopping = false;  // committed: exit once the engine loop ends
         constinit bool g_stop_failed = false;  // committed but can't exit: idle until restart
 
-        // tsnx:ctl Stop, on the ctl thread. Exiting is safe only with no
+        // wgnx:ctl Stop, on the ctl thread. Exiting is safe only with no
         // client session through our MITM, the MITM uninstalled from sm
         // (sm aborts on queries to a dead owner), our psc module gone (the
         // system would wait on it at sleep) and our sockets closed before
         // that. Each check that can refuse runs while it can still be undone.
         u32 StopForOverlay(u32 *detail) {
             *detail = 0;
-            if (g_stopping) return TSNX_CTL_STOP_OK;
-            if (g_stop_failed) return TSNX_CTL_STOP_FAILED;
-            if (!g_runtime) return TSNX_CTL_STOP_BUSY;
+            if (g_stopping) return WGNX_CTL_STOP_OK;
+            if (g_stop_failed) return WGNX_CTL_STOP_FAILED;
+            if (!g_runtime) return WGNX_CTL_STOP_BUSY;
             Log("stop: requested from the overlay");
 
             // 1. No homebrew sessions; new ones bypass us from now on.
@@ -933,23 +933,23 @@ namespace ams {
                     break;
                 case bsd_mitm::StopCheck::Homebrew:
                     Log("stop: refused, homebrew has %u session(s) through us", *detail);
-                    return TSNX_CTL_STOP_HOMEBREW;
+                    return WGNX_CTL_STOP_HOMEBREW;
                 case bsd_mitm::StopCheck::Busy:
-                    return TSNX_CTL_STOP_BUSY;
+                    return WGNX_CTL_STOP_BUSY;
             }
             // 2. Close the engine's sockets (and the UDP log's).
-            if (!g_runtime->Suspend(::tsnx::Runtime::kStopping, std::chrono::milliseconds(3000))) {
+            if (!g_runtime->Suspend(::wgnx::Runtime::kStopping, std::chrono::milliseconds(3000))) {
                 Log("stop: refused, the engine didn't close its sockets in time");
-                g_runtime->Resume(::tsnx::Runtime::kStopping);
+                g_runtime->Resume(::wgnx::Runtime::kStopping);
                 bsd_mitm::CancelStop();
-                return TSNX_CTL_STOP_BUSY;
+                return WGNX_CTL_STOP_BUSY;
             }
             // 3. Leave psc, unless a sleep or wake is under way.
             if (!StopPowerHandling()) {
                 Log("stop: refused, a power state change is under way");
-                g_runtime->Resume(::tsnx::Runtime::kStopping);
+                g_runtime->Resume(::wgnx::Runtime::kStopping);
                 bsd_mitm::CancelStop();
-                return TSNX_CTL_STOP_BUSY;
+                return WGNX_CTL_STOP_BUSY;
             }
 
             // Committed. On failure from here on the process stays, idle:
@@ -960,12 +960,12 @@ namespace ams {
             if (!bsd_mitm::UninstallForStop()) {
                 Log("stop: couldn't detach from the system cleanly; staying idle until the console restarts");
                 g_stop_failed = true;
-                return TSNX_CTL_STOP_FAILED;
+                return WGNX_CTL_STOP_FAILED;
             }
             Log("stop: exiting (it starts again at boot, or from the overlay)");
             g_stopping = true;
             g_runtime->Stop();  // the main thread exits once the loop returns
-            return TSNX_CTL_STOP_OK;
+            return WGNX_CTL_STOP_OK;
         }
 
         // After StopForOverlay: nothing of ours is registered anywhere, and
@@ -991,7 +991,7 @@ namespace ams {
         static_cast<void>(fs::CreateDirectory("sdmc:/config"));
         static_cast<void>(fs::CreateDirectory(ConfigDir));
         OpenLog();
-        Log("tailscale-nx sysmodule %s starting", tsnx_version());
+        Log("wireguard-nx sysmodule %s starting", wgnx_version());
         if (FileExists(DisabledPath)) {
             Log("%s exists: staying disabled", DisabledPath);
             return;
@@ -1008,7 +1008,7 @@ namespace ams {
         if (pool_known && sys_free < MinSystemFree) {
             char why[200];
             const int n = util::SNPrintf(why, sizeof why,
-                                         "Too little system memory: other sysmodules leave %lu KB free with tailscale-nx running, "
+                                         "Too little system memory: other sysmodules leave %lu KB free with wireguard-nx running, "
                                          "and it keeps %lu KB free for the system.\n",
                                          static_cast<unsigned long>(sys_free / 1024), static_cast<unsigned long>(MinSystemFree / 1024));
             Log("%.*s; not starting", n - 1, why);
@@ -1036,13 +1036,13 @@ namespace ams {
         Config cfg;
         LoadConfig(cfg);
         if (cfg.log_udp[0]) SetUpUdpLog(cfg.log_udp);
-        tsnx_set_log_callback([](u32 level, const char *msg) { Log("%s%s", level <= 2 ? "WARN " : "", msg); }, 3);
-        tsnx_set_resolver(ResolveViaDns);
+        wgnx_set_log_callback([](u32 level, const char *msg) { Log("%s%s", level <= 2 ? "WARN " : "", msg); }, 3);
+        wgnx_set_resolver(ResolveViaDns);
 
         u8 seed[32];
         os::GenerateRandomBytes(seed, sizeof seed);
-        tsnx_seed_rng(seed);
-        if (const u32 st = tsnx_selftest(); st != TSNX_SELFTEST_OK) {
+        wgnx_seed_rng(seed);
+        if (const u32 st = wgnx_selftest(); st != WGNX_SELFTEST_OK) {
             Log("crypto selftest FAILED (%u); not starting", st);
             return;
         }
@@ -1081,12 +1081,12 @@ namespace ams {
 
         bool corrected = false;
         const u64 console_time = ConsoleUnixTime();
-        u64 unix_time = tsnx_sane_unix_time(console_time, cfg.control_url, &corrected);
+        u64 unix_time = wgnx_sane_unix_time(console_time, cfg.control_url, &corrected);
         if (corrected) Log("console clock implausible (%llu); using the control server's time (%llu)",
                            static_cast<unsigned long long>(console_time), static_cast<unsigned long long>(unix_time));
         if (unix_time == 0) unix_time = console_time;
 
-        TsnxConfig ecfg = {};
+        WgnxConfig ecfg = {};
         ecfg.control_url = cfg.control_url;
         ecfg.auth_key = cfg.auth_key[0] ? cfg.auth_key : nullptr;
         ecfg.hostname = cfg.hostname;
@@ -1095,7 +1095,7 @@ namespace ams {
         ecfg.disco_key = disco;
         ecfg.extra_root_der = ca_len > 0 ? ca.get() : nullptr;
         ecfg.extra_root_len = ca_len > 0 ? static_cast<size_t>(ca_len) : 0;
-        TsnxEngine *engine = tsnx_engine_new(&ecfg, tsnx_driver_now_ns(), unix_time);
+        WgnxEngine *engine = wgnx_engine_new(&ecfg, wgnx_driver_now_ns(), unix_time);
         ca.reset();
         if (!engine) {
             Log("engine init failed (control_url %s)", cfg.control_url);
@@ -1104,38 +1104,38 @@ namespace ams {
         // Peer names or addresses changed: refresh the hosts file (debounced
         // in the loop below). Events arrive with the runtime lock held.
         static u64 hosts_dirty_since = 0;
-        TsnxDriver *driver = tsnx_driver_new(engine, [](void *ctx, const TsnxEvent *ev) {
+        WgnxDriver *driver = wgnx_driver_new(engine, [](void *ctx, const WgnxEvent *ev) {
             Log("%s: %s (%u)", EventName(ev->kind), ev->text, ev->value);
-            if (ev->kind == TSNX_EVENT_NODE_KEY) SaveNodeKey(static_cast<TsnxEngine *>(ctx));
+            if (ev->kind == WGNX_EVENT_NODE_KEY) SaveNodeKey(static_cast<WgnxEngine *>(ctx));
             status::OnEvent(*ev);
-            if ((ev->kind == TSNX_EVENT_PEERS || ev->kind == TSNX_EVENT_ADDRESSES) && hosts_dirty_since == 0) {
+            if ((ev->kind == WGNX_EVENT_PEERS || ev->kind == WGNX_EVENT_ADDRESSES) && hosts_dirty_since == 0) {
                 hosts_dirty_since = armTicksToNs(armGetSystemTick());
             }
-            if (ev->kind == TSNX_EVENT_PEERS) {
+            if (ev->kind == WGNX_EVENT_PEERS) {
                 // Subnet routes for the MITM (64 * 18 bytes: static, not stack).
-                static TsnxPrefix routes[::tsnx::VSock::MaxRoutes];
-                const size_t n = tsnx_engine_routes(static_cast<TsnxEngine *>(ctx), routes, ::tsnx::VSock::MaxRoutes);
+                static WgnxPrefix routes[::wgnx::VSock::MaxRoutes];
+                const size_t n = wgnx_engine_routes(static_cast<WgnxEngine *>(ctx), routes, ::wgnx::VSock::MaxRoutes);
                 static size_t logged = SIZE_MAX;
                 if (n != logged) {
                     logged = n;
-                    Log("subnet routes in use: %zu%s", n, n > ::tsnx::VSock::MaxRoutes ? " (only the first 64 are used)" : "");
+                    Log("subnet routes in use: %zu%s", n, n > ::wgnx::VSock::MaxRoutes ? " (only the first 64 are used)" : "");
                 }
-                ::tsnx::VSock::SetRoutes(routes, std::min(n, ::tsnx::VSock::MaxRoutes));
+                ::wgnx::VSock::SetRoutes(routes, std::min(n, ::wgnx::VSock::MaxRoutes));
             }
         }, engine);
         const bool accept_routes = std::strcmp(cfg.accept_routes, "off") != 0;
-        tsnx_engine_set_accept_routes(engine, accept_routes);
+        wgnx_engine_set_accept_routes(engine, accept_routes);
         const bool magicdns = std::strcmp(cfg.magicdns, "off") != 0;
         if (cfg.overlay_budget_kb[0]) {
             // Bounded by the sysmodule's heap (heap_size.h): the engine and
             // the MITM need about 300 KB of it besides the overlay buffers.
             const unsigned long kb = std::clamp(std::strtoul(cfg.overlay_budget_kb, nullptr, 10), 128ul, 384ul);
-            tsnx_net_set_budget(engine, kb * 1024);
+            wgnx_net_set_budget(engine, kb * 1024);
             Log("overlay buffer budget: %lu KB", kb);
         }
-        if (tsnx_driver_open_udp(driver, 41641) != 0 && tsnx_driver_open_udp(driver, 0) != 0) Log("no UDP socket: DERP only");
+        if (wgnx_driver_open_udp(driver, 41641) != 0 && wgnx_driver_open_udp(driver, 0) != 0) Log("no UDP socket: DERP only");
         std::string error;
-        auto rt = ::tsnx::Runtime::Adopt(engine, driver, &error);
+        auto rt = ::wgnx::Runtime::Adopt(engine, driver, &error);
         if (!rt) {
             Log("runtime: %s (errno %d)", error.c_str(), errno);
             return;
@@ -1178,7 +1178,7 @@ namespace ams {
 
         // Status for the overlay (and the user's pause switch, applied before
         // the engine loop's first round), then its control service.
-        status::Initialize(*rt, (mitm ? TSNX_CTL_FLAG_MITM : 0) | (magicdns ? TSNX_CTL_FLAG_MAGICDNS : 0),
+        status::Initialize(*rt, (mitm ? WGNX_CTL_FLAG_MITM : 0) | (magicdns ? WGNX_CTL_FLAG_MAGICDNS : 0),
                            std::strcmp(cfg.connect_notice, "off") != 0);
         ctl::Start(StopForOverlay);
 
@@ -1200,7 +1200,7 @@ namespace ams {
         }
         // The engine loop runs on core 2 when it can (see bsd_mitm::EngineCores).
         os::SetThreadCoreMask(os::GetCurrentThread(), bsd_mitm::PreferredCore, bsd_mitm::EngineCores);
-        rt->Run([&](TsnxDriver *d) {
+        rt->Run([&](WgnxDriver *d) {
             const u64 now = armTicksToNs(armGetSystemTick());
             WatchBootMemory(now);
             // A round takes at most about a second (the poll timeout).
@@ -1209,8 +1209,8 @@ namespace ams {
             }
             g_last_round_ns = now;
             status::EngineRan(now);
-            TsnxActivePeer active[TSNX_CTL_MAX_PEERS];
-            status::SetActivePeers(active, tsnx_engine_active_peers(engine, active, TSNX_CTL_MAX_PEERS));
+            WgnxActivePeer active[WGNX_CTL_MAX_PEERS];
+            status::SetActivePeers(active, wgnx_engine_active_peers(engine, active, WGNX_CTL_MAX_PEERS));
             // Whole-heap use (Rust, C++, C), sampled every round; the Rust
             // peak below is exact.
             const size_t heap_free = init::GetAllocator()->GetTotalFreeSize();
@@ -1223,17 +1223,17 @@ namespace ams {
             if (now - last_heap_log > 60'000'000'000ull) {
                 last_heap_log = now;
                 size_t cur = 0, peak = 0;
-                tsnx_heap_stats(&cur, &peak);
+                wgnx_heap_stats(&cur, &peak);
                 Log("heap: rust %zu KB (peak %zu), all %zu KB (peak %zu, largest free %zu) of %zu KB; overlay buffers %zu KB", cur / 1024,
                     peak / 1024, (MallocBufferSize - std::min(heap_free, MallocBufferSize)) / 1024, heap_all_peak / 1024,
-                    init::GetAllocator()->GetAllocatableSize() / 1024, MallocBufferSize / 1024, tsnx_net_buffer_usage(engine) / 1024);
+                    init::GetAllocator()->GetAllocatableSize() / 1024, MallocBufferSize / 1024, wgnx_net_buffer_usage(engine) / 1024);
                 char classes[200];
-                tsnx_heap_classes(classes, sizeof classes);
+                wgnx_heap_classes(classes, sizeof classes);
                 Log("heap by size (KB/allocs): %s", classes);
                 stack_watch::Log();
             }
             int bsd_errno = 0;
-            if (const int b = tsnx_driver_batched_receive(d, &bsd_errno); b != batched) {
+            if (const int b = wgnx_driver_batched_receive(d, &bsd_errno); b != batched) {
                 batched = b;
                 if (b > 0) {
                     Log("udp: batched receive");
@@ -1257,10 +1257,10 @@ namespace ams {
                 status::SetOffline(cur == 0);
                 if (cur != ip) {
                     Log("local address changed: %s", cur ? inet_ntoa(in_addr{cur}) : "(offline)");
-                    if (cur && !ip) tsnx_engine_network_up(engine, tsnx_driver_now_ns());
+                    if (cur && !ip) wgnx_engine_network_up(engine, wgnx_driver_now_ns());
                     ip = cur;
                     SetLocalNet(cur);
-                    if (cur) tsnx_driver_refresh_endpoints(d);
+                    if (cur) wgnx_driver_refresh_endpoints(d);
                 }
             }
         }, [&] {
@@ -1295,7 +1295,7 @@ namespace ams {
     // A crash in this process (libstratosphere's CrashHandler builds `ctx`
     // and calls this; the default reboots into the fatal screen). Log where
     // it happened, as offsets into our binary for addr2line, then end only
-    // this process: tailscale-nx stops but the console keeps running.
+    // this process: wireguard-nx stops but the console keeps running.
     // Runs on the one-page exception stack, maybe with the log mutex held,
     // so it formats into a static buffer and writes without locking.
     void ExceptionHandler(FatalErrorContext *ctx) {
@@ -1329,10 +1329,10 @@ namespace ams {
 
 }
 
-extern "C" [[noreturn]] void tsnx_platform_panic(const uint8_t *msg, size_t len) {
+extern "C" [[noreturn]] void wgnx_platform_panic(const uint8_t *msg, size_t len) {
     ams::g_log_defer_thread = nullptr;  // written now, with any lines still waiting
-    ams::Log("PANIC in tsnx core: %.*s", static_cast<int>(len), reinterpret_cast<const char *>(msg));
-    AMS_ABORT("tsnx core panic");
+    ams::Log("PANIC in wgnx core: %.*s", static_cast<int>(len), reinterpret_cast<const char *>(msg));
+    AMS_ABORT("wgnx core panic");
 }
 
 // libstratosphere routes operator new/delete through its allocator only when
@@ -1347,9 +1347,9 @@ void operator delete[](void *p) { std::free(p); }
 void operator delete[](void *p, size_t) { std::free(p); }
 
 // The shared C helpers' snprintf, routed to libstratosphere's formatter
-// (the sysmodule build defines snprintf=tsnx_snprintf): newlib's would add
+// (the sysmodule build defines snprintf=wgnx_snprintf): newlib's would add
 // its float formatting and stdio to the binary.
-extern "C" int tsnx_snprintf(char *dst, size_t size, const char *fmt, ...) {
+extern "C" int wgnx_snprintf(char *dst, size_t size, const char *fmt, ...) {
     std::va_list vl;
     va_start(vl, fmt);
     const int n = ams::util::VSNPrintf(dst, size, fmt, vl);
@@ -1357,5 +1357,5 @@ extern "C" int tsnx_snprintf(char *dst, size_t size, const char *fmt, ...) {
     return n;
 }
 
-// Used by the shared app helpers (tsnx_app.c).
-extern "C" void tsnx_platform_random(uint8_t *buf, size_t len) { ams::os::GenerateRandomBytes(buf, len); }
+// Used by the shared app helpers (wgnx_app.c).
+extern "C" void wgnx_platform_random(uint8_t *buf, size_t len) { ams::os::GenerateRandomBytes(buf, len); }

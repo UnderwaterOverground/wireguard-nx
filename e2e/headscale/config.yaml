@@ -57,7 +57,7 @@ policy:
 
 dns:
   magic_dns: true
-  base_domain: e2e.tsnx.test
+  base_domain: e2e.wgnx.test
   override_local_dns: false
   nameservers:
     global: []

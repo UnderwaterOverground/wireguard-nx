@@ -1,18 +1,18 @@
-# Top-level entry points. Switch builds run inside the tsnx-build Docker image
+# Top-level entry points. Switch builds run inside the wgnx-build Docker image
 # (devkitA64 + libnx + Rust nightly) so nothing beyond Docker is needed on the
 # host. Set IN_DOCKER=1 to run the Switch steps directly (e.g. in CI).
 
 SWITCH_TARGET := aarch64-nintendo-switch-freestanding
 # Build time: a floor for "is the console's clock plausible" (TLS needs it).
 BUILD_UNIX := $(shell date +%s)
-export TSNX_BUILD_UNIX := $(BUILD_UNIX)
+export WGNX_BUILD_UNIX := $(BUILD_UNIX)
 RUST_SWITCH_FLAGS := --release --target $(SWITCH_TARGET) -Zbuild-std=core,alloc
-DOCKER_IMAGE := tsnx-build
+DOCKER_IMAGE := wgnx-build
 
 ifeq ($(IN_DOCKER),1)
   SW :=
 else
-  SW := docker run --rm -v "$(CURDIR)":/src -v tsnx-cargo-registry:/opt/cargo/registry -e CARGO_TARGET_DIR=/src/target/switch -w /src $(DOCKER_IMAGE)
+  SW := docker run --rm -v "$(CURDIR)":/src -v wgnx-cargo-registry:/opt/cargo/registry -e CARGO_TARGET_DIR=/src/target/switch -w /src $(DOCKER_IMAGE)
 endif
 
 .PHONY: drop-test publish release overlay mitm-test nxlink-mitm-test speedtest nxlink-speedtest all host-test host-c e2e sysmodule libstratosphere docker-image rust-switch nro nxlink clean
@@ -22,11 +22,11 @@ all: host-test nro
 host-test: drop-test
 	cargo test --workspace
 
-# Taildrop's file saving (native/driver/tsnx_drop.c) on a temporary folder.
+# Taildrop's file saving (native/driver/wgnx_drop.c) on a temporary folder.
 drop-test:
 	@mkdir -p target
-	$(CC) -Wall -Wextra -O1 -g -fsanitize=address,undefined -Icrates/tsnx-ffi/include -Inative/driver \
-		-o target/drop-test native/host/drop_test.c native/driver/tsnx_drop.c
+	$(CC) -Wall -Wextra -O1 -g -fsanitize=address,undefined -Icrates/wgnx-ffi/include -Inative/driver \
+		-o target/drop-test native/host/drop_test.c native/driver/wgnx_drop.c
 	target/drop-test
 
 # Local tailnet end-to-end tests (headscale + stock tailscaled in Docker).
@@ -35,14 +35,14 @@ e2e:
 	e2e/run-tests.sh
 
 # Host build of the C driver + FFI (the Switch app's code paths, on the Mac).
-HOST_C_SRCS := native/host/main.c native/driver/tsnx_driver.c native/driver/tsnx_app.c native/driver/tsnx_dns.c native/driver/tsnx_drop.c \
-	native/driver/tsnx_update.c
-host-c: target/tsnx-c
+HOST_C_SRCS := native/host/main.c native/driver/wgnx_driver.c native/driver/wgnx_app.c native/driver/wgnx_dns.c native/driver/wgnx_drop.c \
+	native/driver/wgnx_update.c
+host-c: target/wgnx-c
 
-target/tsnx-c: $(HOST_C_SRCS) native/driver/*.h crates/tsnx-ffi/include/tsnx.h FORCE
-	cargo build -p tsnx-ffi
-	$(CC) -O1 -g -Wall -Wextra -DTSNX_BUILD_UNIX=$(BUILD_UNIX) -o $@ $(HOST_C_SRCS) -Icrates/tsnx-ffi/include -Inative/driver \
-		target/debug/libtsnx_ffi.a -framework CoreFoundation -framework Security
+target/wgnx-c: $(HOST_C_SRCS) native/driver/*.h crates/wgnx-ffi/include/wgnx.h FORCE
+	cargo build -p wgnx-ffi
+	$(CC) -O1 -g -Wall -Wextra -DWGNX_BUILD_UNIX=$(BUILD_UNIX) -o $@ $(HOST_C_SRCS) -Icrates/wgnx-ffi/include -Inative/driver \
+		target/debug/libwgnx_ffi.a -framework CoreFoundation -framework Security
 
 FORCE:
 
@@ -50,17 +50,17 @@ docker-image:
 	docker build -t $(DOCKER_IMAGE) docker
 
 rust-switch:
-	$(SW) cargo build -p tsnx-ffi $(RUST_SWITCH_FLAGS)
+	$(SW) cargo build -p wgnx-ffi $(RUST_SWITCH_FLAGS)
 
 nro: rust-switch
-	$(SW) make -C switch/app TSNX_BUILD_UNIX=$(BUILD_UNIX)
+	$(SW) make -C switch/app WGNX_BUILD_UNIX=$(BUILD_UNIX)
 
 # Send the NRO to hbmenu's netloader (press Y on the console first) and stream
 # its stdout back. NXLINK_HOST is the console's IP; broadcast discovery does not
 # work from inside Docker Desktop.
 # Atmosphère's libstratosphere (pinned to the console's Atmosphère, 1.12.0).
 LIBSTRAT := third_party/Atmosphere/libraries/libstratosphere/lib/nintendo_nx_arm64_armv8a/release/libstratosphere.a
-# Fixes to Atmosphère's libraries that tailscale-nx needs (see patches/),
+# Fixes to Atmosphère's libraries that wireguard-nx needs (see patches/),
 # applied to the submodule before building; a changed patch rebuilds.
 ATMOSPHERE_PATCHES := $(sort $(wildcard patches/atmosphere-*.patch))
 libstratosphere: $(LIBSTRAT)
@@ -74,8 +74,8 @@ $(LIBSTRAT): $(ATMOSPHERE_PATCHES)
 # Then holds its memory at exactly 2.5 MB (tools/footprint.sh resizes the heap
 # and asks for one more build when the code size moved).
 sysmodule: rust-switch $(LIBSTRAT)
-	$(SW) make -C switch/sysmodule TSNX_BUILD_UNIX=$(BUILD_UNIX) dist
-	$(SW) tools/footprint.sh || { [ $$? -eq 3 ] && $(SW) make -C switch/sysmodule TSNX_BUILD_UNIX=$(BUILD_UNIX) dist && $(SW) tools/footprint.sh; }
+	$(SW) make -C switch/sysmodule WGNX_BUILD_UNIX=$(BUILD_UNIX) dist
+	$(SW) tools/footprint.sh || { [ $$? -eq 3 ] && $(SW) make -C switch/sysmodule WGNX_BUILD_UNIX=$(BUILD_UNIX) dist && $(SW) tools/footprint.sh; }
 
 # Publish to GitHub: only main and v* tags (the `github` remote's push
 # refspecs); other branches stay on the private Gitea. Pushing a v* tag
@@ -83,7 +83,7 @@ sysmodule: rust-switch $(LIBSTRAT)
 publish:
 	git push github
 
-# Release zip for the SD card root: dist/tailscale-nx-<version>.zip
+# Release zip for the SD card root: dist/wireguard-nx-<version>.zip
 release:
 	tools/package-release.sh
 
@@ -116,7 +116,7 @@ nxlink: nro target/nxlink
 	@test -n "$(NXLINK_HOST)" || (echo "set NXLINK_HOST=<switch ip>" && false)
 	# `script` gives nxlink a pty so the console's log streams line by line
 	# (also into target/nxlink.log).
-	script -q target/nxlink.log target/nxlink -a $(NXLINK_HOST) -s switch/app/tsnx-app.nro
+	script -q target/nxlink.log target/nxlink -a $(NXLINK_HOST) -s switch/app/wgnx-app.nro
 
 # nxlink built natively (switchbrew/switch-tools): the console has to connect
 # back for stdout, which is simplest without Docker's port mapping.
@@ -126,34 +126,34 @@ target/nxlink:
 
 clean:
 	cargo clean
-	$(SW) make -C switch/app TSNX_BUILD_UNIX=$(BUILD_UNIX) clean
+	$(SW) make -C switch/app WGNX_BUILD_UNIX=$(BUILD_UNIX) clean
 
 # Interpose shim (run unmodified programs through the socket virtualization
 # layer) and its test client, for macOS.
 VSOCK_SRCS := native/vsock/vsock.cpp native/runtime/runtime.cpp native/interpose/interpose.cpp
-VSOCK_C_SRCS := native/driver/tsnx_driver.c native/driver/tsnx_app.c native/driver/tsnx_drop.c
-VSOCK_INC := -Icrates/tsnx-ffi/include -Inative/driver -Inative/runtime -Inative/vsock
+VSOCK_C_SRCS := native/driver/wgnx_driver.c native/driver/wgnx_app.c native/driver/wgnx_drop.c
+VSOCK_INC := -Icrates/wgnx-ffi/include -Inative/driver -Inative/runtime -Inative/vsock
 .PHONY: interpose
-interpose: target/libtsnx_interpose.dylib target/vsock-test
+interpose: target/libwgnx_interpose.dylib target/vsock-test
 
-target/libtsnx_interpose.dylib: $(VSOCK_SRCS) $(VSOCK_C_SRCS) native/*/*.h* FORCE
-	cargo build -p tsnx-ffi
-	$(CC) -c -O1 -g -Wall $(VSOCK_INC) native/driver/tsnx_driver.c -o target/tsnx_driver.o
-	$(CC) -c -O1 -g -Wall -DTSNX_BUILD_UNIX=$(BUILD_UNIX) $(VSOCK_INC) native/driver/tsnx_app.c -o target/tsnx_app.o
-	$(CC) -c -O1 -g -Wall $(VSOCK_INC) native/driver/tsnx_dns.c -o target/tsnx_dns.o
-	$(CC) -c -O1 -g -Wall $(VSOCK_INC) native/driver/tsnx_drop.c -o target/tsnx_drop.o
-	$(CXX) -std=c++17 -O1 -g -Wall -dynamiclib -o $@ $(VSOCK_INC) $(VSOCK_SRCS) target/tsnx_driver.o target/tsnx_app.o target/tsnx_dns.o target/tsnx_drop.o \
-		target/debug/libtsnx_ffi.a -framework CoreFoundation -framework Security
+target/libwgnx_interpose.dylib: $(VSOCK_SRCS) $(VSOCK_C_SRCS) native/*/*.h* FORCE
+	cargo build -p wgnx-ffi
+	$(CC) -c -O1 -g -Wall $(VSOCK_INC) native/driver/wgnx_driver.c -o target/wgnx_driver.o
+	$(CC) -c -O1 -g -Wall -DWGNX_BUILD_UNIX=$(BUILD_UNIX) $(VSOCK_INC) native/driver/wgnx_app.c -o target/wgnx_app.o
+	$(CC) -c -O1 -g -Wall $(VSOCK_INC) native/driver/wgnx_dns.c -o target/wgnx_dns.o
+	$(CC) -c -O1 -g -Wall $(VSOCK_INC) native/driver/wgnx_drop.c -o target/wgnx_drop.o
+	$(CXX) -std=c++17 -O1 -g -Wall -dynamiclib -o $@ $(VSOCK_INC) $(VSOCK_SRCS) target/wgnx_driver.o target/wgnx_app.o target/wgnx_dns.o target/wgnx_drop.o \
+		target/debug/libwgnx_ffi.a -framework CoreFoundation -framework Security
 
 # The socket layer's subnet-route check (macOS; links the interpose shim).
 .PHONY: routes-test
-routes-test: target/libtsnx_interpose.dylib
+routes-test: target/libwgnx_interpose.dylib
 	$(CXX) -std=c++17 -O1 -g -Wall $(VSOCK_INC) -o target/routes-test native/host/routes_test.cpp $<
 	target/routes-test
 
 # The runtime's non-blocking pause (macOS; links the interpose shim).
 .PHONY: runtime-test
-runtime-test: target/libtsnx_interpose.dylib
+runtime-test: target/libwgnx_interpose.dylib
 	$(CXX) -std=c++17 -O1 -g -Wall $(VSOCK_INC) -o target/runtime-test native/host/runtime_test.cpp $<
 	target/runtime-test
 

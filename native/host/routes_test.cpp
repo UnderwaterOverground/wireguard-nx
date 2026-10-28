@@ -6,7 +6,7 @@
 
 #include "vsock.hpp"
 
-using tsnx::VSock;
+using wgnx::VSock;
 
 static bool Routed(const char *ip) {
     sockaddr_in a{};
@@ -15,8 +15,8 @@ static bool Routed(const char *ip) {
     return VSock::IsTailnet(reinterpret_cast<sockaddr *>(&a));
 }
 
-static TsnxPrefix V4(const char *ip, uint8_t len) {
-    TsnxPrefix p{};
+static WgnxPrefix V4(const char *ip, uint8_t len) {
+    WgnxPrefix p{};
     p.family = 4;
     p.len = len;
     inet_pton(AF_INET, ip, p.ip);
@@ -25,7 +25,7 @@ static TsnxPrefix V4(const char *ip, uint8_t len) {
 
 int main() {
     assert(Routed("100.100.1.2") && !Routed("192.168.1.10"));
-    const TsnxPrefix routes[] = {V4("192.168.1.0", 24), V4("10.0.0.0", 8), V4("172.16.5.0", 24)};
+    const WgnxPrefix routes[] = {V4("192.168.1.0", 24), V4("10.0.0.0", 8), V4("172.16.5.0", 24)};
     VSock::SetRoutes(routes, 3);
     assert(Routed("192.168.1.10") && Routed("10.200.0.1") && Routed("172.16.5.9"));
     assert(!Routed("192.168.2.1") && !Routed("172.16.6.1"));

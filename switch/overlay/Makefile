@@ -1,4 +1,4 @@
-# Tailscale overlay for tailscale-nx (Tesla/Ultrahand). Built from the
+# Tailscale overlay for wireguard-nx (Tesla/Ultrahand). Built from the
 # Tesla-Template Makefile; libtesla and qrcodegen are vendored in third_party.
 
 #---------------------------------------------------------------------------------
@@ -40,11 +40,11 @@ include $(DEVKITPRO)/libnx/switch_rules
 #   of a homebrew executable (.nro). This is intended to be used for sysmodules.
 #   NACP building is skipped as well.
 #---------------------------------------------------------------------------------
-APP_TITLE	:=	Tailscale
+APP_TITLE	:=	WireGuard
 APP_AUTHOR	:=	UnderwaterOverground
 APP_VERSION :=	1.2.0
 
-TARGET		:=	tailscale-nx
+TARGET		:=	wireguard-nx
 BUILD		:=	build
 SOURCES		:=	source ../../third_party/qrcodegen
 DATA		:=	data

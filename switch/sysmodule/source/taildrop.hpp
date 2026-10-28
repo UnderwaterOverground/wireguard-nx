@@ -1,10 +1,10 @@
 // Taildrop receive on the Switch: files sent with `tailscale file cp` or the
-// Tailscale apps' "Send file" land in sdmc:/Taildrop (see tsnx_drop.h for the
+// Tailscale apps' "Send file" land in sdmc:/Taildrop (see wgnx_drop.h for the
 // policy), with a toast for each.
 #pragma once
 #include <stratosphere.hpp>
 
-#include "tsnx_driver.h"
+#include "wgnx_driver.h"
 
 namespace ams::taildrop {
 
@@ -12,6 +12,6 @@ namespace ams::taildrop {
     constexpr u16 Port = 41643;
 
     // Before the engine loop starts (no lock needed yet). Returns success.
-    bool Start(TsnxDriver *driver);
+    bool Start(WgnxDriver *driver);
 
 }

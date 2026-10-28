@@ -12,16 +12,16 @@
 #include <ctime>
 #include <vector>
 
-#include "tsnx_app.h"
+#include "wgnx_app.h"
 #include "vsock.hpp"
 
-namespace tsnx {
+namespace wgnx {
 
 thread_local int Runtime::internal_depth_ = 0;
 
 namespace {
 
-#ifndef TSNX_NO_STDIO
+#ifndef WGNX_NO_STDIO
 std::vector<uint8_t> ReadFile(const std::string &path) {
     std::vector<uint8_t> out;
     FILE *f = std::fopen(path.c_str(), "rb");
@@ -57,7 +57,7 @@ bool MakeWakePair(int *rx, int *tx) {
 
 }  // namespace
 
-#ifndef TSNX_NO_STDIO  // reads state/root files with stdio; embedders without it use Adopt()
+#ifndef WGNX_NO_STDIO  // reads state/root files with stdio; embedders without it use Adopt()
 std::unique_ptr<Runtime> Runtime::Start(RuntimeConfig cfg, std::string *error) {
     InternalScope internal;
     std::unique_ptr<Runtime> rt(new Runtime());
@@ -65,10 +65,10 @@ std::unique_ptr<Runtime> Runtime::Start(RuntimeConfig cfg, std::string *error) {
     const RuntimeConfig &c = rt->cfg_;
 
     uint8_t seed[32];
-    tsnx_platform_random(seed, sizeof seed);
-    tsnx_seed_rng(seed);
+    wgnx_platform_random(seed, sizeof seed);
+    wgnx_seed_rng(seed);
     uint8_t machine[32], node[32], disco[32];
-    if (tsnx_state_load_or_create(c.state_path.c_str(), machine, node, disco) != 0) {
+    if (wgnx_state_load_or_create(c.state_path.c_str(), machine, node, disco) != 0) {
         *error = "cannot read/write state " + c.state_path;
         return nullptr;
     }
@@ -77,7 +77,7 @@ std::unique_ptr<Runtime> Runtime::Start(RuntimeConfig cfg, std::string *error) {
         *error = "cannot read " + c.extra_root_path;
         return nullptr;
     }
-    TsnxConfig ec{};
+    WgnxConfig ec{};
     ec.control_url = c.control_url.c_str();
     ec.auth_key = c.auth_key.empty() ? nullptr : c.auth_key.c_str();
     ec.hostname = c.hostname.c_str();
@@ -87,38 +87,38 @@ std::unique_ptr<Runtime> Runtime::Start(RuntimeConfig cfg, std::string *error) {
     ec.extra_root_der = root.empty() ? nullptr : root.data();
     ec.extra_root_len = root.size();
     bool corrected = false;
-    uint64_t unix_time = tsnx_sane_unix_time(static_cast<uint64_t>(std::time(nullptr)), c.control_url.c_str(), &corrected);
+    uint64_t unix_time = wgnx_sane_unix_time(static_cast<uint64_t>(std::time(nullptr)), c.control_url.c_str(), &corrected);
     if (unix_time == 0) unix_time = static_cast<uint64_t>(std::time(nullptr));
-    rt->engine_ = tsnx_engine_new(&ec, tsnx_driver_now_ns(), unix_time);
+    rt->engine_ = wgnx_engine_new(&ec, wgnx_driver_now_ns(), unix_time);
     if (!rt->engine_) {
-        *error = "tsnx_engine_new failed (bad control URL?)";
+        *error = "wgnx_engine_new failed (bad control URL?)";
         return nullptr;
     }
-    tsnx_engine_set_accept_routes(rt->engine_, c.accept_routes);
+    wgnx_engine_set_accept_routes(rt->engine_, c.accept_routes);
     Runtime *self = rt.get();
-    rt->driver_ = tsnx_driver_new(
+    rt->driver_ = wgnx_driver_new(
         rt->engine_,
-        [](void *ctx, const TsnxEvent *ev) {
+        [](void *ctx, const WgnxEvent *ev) {
             auto *r = static_cast<Runtime *>(ctx);
-            if (ev->kind == TSNX_EVENT_NODE_KEY) {
+            if (ev->kind == WGNX_EVENT_NODE_KEY) {
                 uint8_t node[32];
-                tsnx_engine_node_key(r->engine_, node);
-                tsnx_state_set_node(r->cfg_.state_path.c_str(), node);
+                wgnx_engine_node_key(r->engine_, node);
+                wgnx_state_set_node(r->cfg_.state_path.c_str(), node);
             }
-            if (ev->kind == TSNX_EVENT_PEERS && r->cfg_.accept_routes) {
-                TsnxPrefix routes[VSock::MaxRoutes];
-                const size_t n = tsnx_engine_routes(r->engine_, routes, VSock::MaxRoutes);
+            if (ev->kind == WGNX_EVENT_PEERS && r->cfg_.accept_routes) {
+                WgnxPrefix routes[VSock::MaxRoutes];
+                const size_t n = wgnx_engine_routes(r->engine_, routes, VSock::MaxRoutes);
                 VSock::SetRoutes(routes, std::min(n, VSock::MaxRoutes));
             }
             if (r->cfg_.on_event) r->cfg_.on_event(*ev);
         },
         self);
-    if (!c.connect_map.empty()) tsnx_driver_set_connect_map(rt->driver_, c.connect_map.c_str());
-    tsnx_driver_open_udp(rt->driver_, c.udp_port);  // failure: DERP only
+    if (!c.connect_map.empty()) wgnx_driver_set_connect_map(rt->driver_, c.connect_map.c_str());
+    wgnx_driver_open_udp(rt->driver_, c.udp_port);  // failure: DERP only
     if (!c.taildrop_dir.empty()) {
-        rt->drop_.reset(new TsnxDropDir());
-        TsnxDropSink sink = tsnx_drop_dir(rt->drop_.get(), &tsnx_posix_fs, c.taildrop_dir.c_str(), nullptr, nullptr);
-        if (tsnx_driver_set_taildrop(rt->driver_, &sink, c.taildrop_port) != 0) {
+        rt->drop_.reset(new WgnxDropDir());
+        WgnxDropSink sink = wgnx_drop_dir(rt->drop_.get(), &wgnx_posix_fs, c.taildrop_dir.c_str(), nullptr, nullptr);
+        if (wgnx_driver_set_taildrop(rt->driver_, &sink, c.taildrop_port) != 0) {
             *error = "cannot listen for Taildrop on port " + std::to_string(c.taildrop_port);
             return nullptr;
         }
@@ -132,7 +132,7 @@ std::unique_ptr<Runtime> Runtime::Start(RuntimeConfig cfg, std::string *error) {
 }
 #endif
 
-std::unique_ptr<Runtime> Runtime::Adopt(TsnxEngine *engine, TsnxDriver *driver, std::string *error) {
+std::unique_ptr<Runtime> Runtime::Adopt(WgnxEngine *engine, WgnxDriver *driver, std::string *error) {
     std::unique_ptr<Runtime> rt(new Runtime());
     rt->engine_ = engine;
     rt->driver_ = driver;
@@ -144,7 +144,7 @@ std::unique_ptr<Runtime> Runtime::Adopt(TsnxEngine *engine, TsnxDriver *driver, 
     return rt;
 }
 
-void Runtime::Run(const std::function<void(TsnxDriver *)> &on_tick, const std::function<void()> &after_tick) {
+void Runtime::Run(const std::function<void(WgnxDriver *)> &on_tick, const std::function<void()> &after_tick) {
     Loop(&on_tick, &after_tick);
 }
 
@@ -161,8 +161,8 @@ Runtime::~Runtime() {
     Stop();
     if (thread_.joinable()) thread_.join();
     if (owned_) {
-        tsnx_driver_free(driver_);
-        tsnx_engine_free(engine_);
+        wgnx_driver_free(driver_);
+        wgnx_engine_free(engine_);
     }
     if (wake_rx_ >= 0) close(wake_rx_);
     if (wake_tx_ >= 0) close(wake_tx_);
@@ -176,11 +176,11 @@ void Runtime::Wake() {
 
 void Runtime::AfterCall() {
     if (suspended_) return;  // I/O resumes (and gets pumped) on Resume()
-    tsnx_driver_pump(driver_);
+    wgnx_driver_pump(driver_);
     // A wake-up costs the loop a round of socket calls, and most calls (a
     // datagram sent or read, a readiness check) leave its poll as good as
     // it was. A loop that isn't in poll() prepares a new one anyway.
-    if (polling_ && tsnx_driver_poll_stale(driver_, poll_until_ns_)) Wake();
+    if (polling_ && wgnx_driver_poll_stale(driver_, poll_until_ns_)) Wake();
 }
 
 bool Runtime::Suspend(SuspendReason why, std::chrono::milliseconds timeout) {
@@ -220,7 +220,7 @@ void Runtime::WaitForLoop() {
     gate_cv_.wait(gate, [&] { return !loop_wants_lock_.load(std::memory_order_acquire); });
 }
 
-bool Runtime::WaitFor(const std::function<bool(TsnxEngine *)> &ready, const Clock::time_point *deadline) {
+bool Runtime::WaitFor(const std::function<bool(WgnxEngine *)> &ready, const Clock::time_point *deadline) {
     std::unique_lock<std::mutex> lock(mu_);
     for (;;) {
         if (ready(engine_)) return true;
@@ -233,9 +233,9 @@ bool Runtime::WaitFor(const std::function<bool(TsnxEngine *)> &ready, const Cloc
     }
 }
 
-void Runtime::Loop(const std::function<void(TsnxDriver *)> *on_tick, const std::function<void()> *after_tick) {
+void Runtime::Loop(const std::function<void(WgnxDriver *)> *on_tick, const std::function<void()> *after_tick) {
     InternalScope internal;  // this thread only ever does engine work
-    pollfd fds[TSNX_DRIVER_MAX_FDS + 1];
+    pollfd fds[WGNX_DRIVER_MAX_FDS + 1];
     std::unique_lock<std::mutex> lock(mu_);
     constexpr uint64_t kTickEveryNs = 50'000'000;
     uint64_t last_tick = 0;
@@ -243,7 +243,7 @@ void Runtime::Loop(const std::function<void(TsnxDriver *)> *on_tick, const std::
         suspend_reasons_ |= async_suspend_.exchange(0);
         ApplyRequests();
         if (suspend_reasons_ != 0) {
-            tsnx_driver_suspend(driver_);
+            wgnx_driver_suspend(driver_);
             close(wake_rx_);
             close(wake_tx_);
             wake_rx_ = wake_tx_ = -1;
@@ -263,7 +263,7 @@ void Runtime::Loop(const std::function<void(TsnxDriver *)> *on_tick, const std::
             // second of latency for new overlay sockets.
             if (on_resume_) on_resume_();
             MakeWakePair(&wake_rx_, &wake_tx_);
-            tsnx_driver_resume(driver_);
+            wgnx_driver_resume(driver_);
             suspended_ = false;
             suspended_flag_ = false;
             cv_.notify_all();
@@ -272,7 +272,7 @@ void Runtime::Loop(const std::function<void(TsnxDriver *)> *on_tick, const std::
         // Housekeeping at most every kTickEveryNs: under load the loop runs
         // hundreds of rounds a second, and the embedder's tick (status,
         // logs, heap stats) would hold the lock through every one.
-        const uint64_t tick_now = tsnx_driver_now_ns();
+        const uint64_t tick_now = wgnx_driver_now_ns();
         bool ticked = false;
         if (on_tick && *on_tick && tick_now - last_tick >= kTickEveryNs) {
             last_tick = tick_now;
@@ -280,19 +280,19 @@ void Runtime::Loop(const std::function<void(TsnxDriver *)> *on_tick, const std::
             ticked = true;
         }
         int wait = 0;
-        int n = tsnx_driver_prepare(driver_, fds, TSNX_DRIVER_MAX_FDS, 1000, &wait);
+        int n = wgnx_driver_prepare(driver_, fds, WGNX_DRIVER_MAX_FDS, 1000, &wait);
         fds[n].fd = wake_rx_;
         fds[n].events = POLLIN;
         fds[n].revents = 0;
         const int nfds = n + (wake_rx_ >= 0 ? 1 : 0);
         polling_ = true;
-        poll_until_ns_ = tsnx_driver_now_ns() + static_cast<uint64_t>(wait) * 1000000;
+        poll_until_ns_ = wgnx_driver_now_ns() + static_cast<uint64_t>(wait) * 1000000;
         lock.unlock();
         if (ticked && after_tick && *after_tick) (*after_tick)();
         int rc = poll(fds, static_cast<nfds_t>(nfds), wait);
         // Socket reads without the lock: each is an IPC on the Switch, and
         // callers (an app reading video) would otherwise wait them out.
-        if (rc > 0) tsnx_driver_prefetch(driver_, fds);
+        if (rc > 0) wgnx_driver_prefetch(driver_, fds);
         {
             std::lock_guard<std::mutex> gate(gate_mu_);
             loop_wants_lock_.store(true, std::memory_order_release);
@@ -309,10 +309,10 @@ void Runtime::Loop(const std::function<void(TsnxDriver *)> *on_tick, const std::
             while (recv(wake_rx_, buf, sizeof buf, 0) > 0) {
             }
         }
-        if (rc > 0) tsnx_driver_dispatch(driver_, fds);
+        if (rc > 0) wgnx_driver_dispatch(driver_, fds);
         // Socket readiness may have changed; let waiters re-check.
         cv_.notify_all();
     }
 }
 
-}  // namespace tsnx
+}  // namespace wgnx

@@ -5,12 +5,12 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 PEER_IP=100.64.0.1
-docker compose build -q tsnx-build >/dev/null 2>&1
+docker compose build -q wgnx-build >/dev/null 2>&1
 docker compose run --rm -e CARGO_PROFILE_FLAG=--release -e RUST_PROFILE_DIR=release \
-  -e TSNX_FFI_FEATURES=switch-limits tsnx-build >/dev/null
+  -e WGNX_FFI_FEATURES=switch-limits wgnx-build >/dev/null
 docker compose exec -T web pkill -f udp-blaster >/dev/null 2>&1 || true
 docker compose exec -T -d web python3 -c "$(cat udp-blaster.py)" 9000 udp-blaster
-docker compose run --rm -T -e TSNX_CONTROL_URL=https://headscale -e TSNX_EXTRA_ROOT=/state/certs/ca.der \
-  -e TSNX_STATE=/state/host/preload.state -e TSNX_AUTHKEY="$(cat state/authkey)" -e TSNX_HOSTNAME=tsnx-preload \
-  -e TSNX_PORT=41642 -e TSNX_WAIT_READY=1 -e LD_PRELOAD=/src/target/linux/libtsnx_interpose.so \
-  --entrypoint /src/target/linux/heap-probe tsnx "$PEER_IP"
+docker compose run --rm -T -e WGNX_CONTROL_URL=https://headscale -e WGNX_EXTRA_ROOT=/state/certs/ca.der \
+  -e WGNX_STATE=/state/host/preload.state -e WGNX_AUTHKEY="$(cat state/authkey)" -e WGNX_HOSTNAME=wgnx-preload \
+  -e WGNX_PORT=41642 -e WGNX_WAIT_READY=1 -e LD_PRELOAD=/src/target/linux/libwgnx_interpose.so \
+  --entrypoint /src/target/linux/heap-probe wgnx "$PEER_IP"

@@ -11,8 +11,8 @@ namespace ams::hosts {
 
     namespace {
 
-        constexpr const char BeginMarker[] = "# >>> tailscale-nx: tailnet names, rewritten automatically; edit outside this block >>>\n";
-        constexpr const char EndMarker[] = "# <<< tailscale-nx <<<\n";
+        constexpr const char BeginMarker[] = "# >>> wireguard-nx: tailnet names, rewritten automatically; edit outside this block >>>\n";
+        constexpr const char EndMarker[] = "# <<< wireguard-nx <<<\n";
 
         // Atmosphère aborts (taking the console down) on a hosts file of
         // 32 KB or more, or a name of 512+ bytes; stay well clear of both.
@@ -132,11 +132,11 @@ namespace ams::hosts {
 
     }
 
-    bool Collect(TsnxEngine *engine) {
+    bool Collect(WgnxEngine *engine) {
         // Runs rarely: working buffers come from the heap, not static memory.
         auto lines = std::make_unique<char[]>(MaxBlock);
         auto block = std::make_unique<char[]>(MaxBlock);
-        tsnx_engine_hosts(engine, lines.get(), MaxBlock);
+        wgnx_engine_hosts(engine, lines.get(), MaxBlock);
         int count = 0;
         const size_t block_len = BuildBlock(lines.get(), block.get(), MaxBlock, std::addressof(count));
         const u64 hash = Hash(block.get(), block_len);

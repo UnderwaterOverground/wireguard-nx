@@ -7,9 +7,9 @@
 
 #include "runtime.hpp"
 
-extern "C" void tsnx_platform_random(uint8_t *buf, size_t len);
+extern "C" void wgnx_platform_random(uint8_t *buf, size_t len);
 
-using tsnx::Runtime;
+using wgnx::Runtime;
 
 static bool WaitSuspended(Runtime &rt, bool want) {
     for (int i = 0; i < 30; i++) {
@@ -21,21 +21,21 @@ static bool WaitSuspended(Runtime &rt, bool want) {
 
 int main() {
     uint8_t seed[32], machine[32], node[32], disco[32];
-    for (uint8_t *k : {seed, machine, node, disco}) tsnx_platform_random(k, 32);
-    tsnx_seed_rng(seed);
+    for (uint8_t *k : {seed, machine, node, disco}) wgnx_platform_random(k, 32);
+    wgnx_seed_rng(seed);
     // Nothing listens there: the engine just keeps retrying.
-    TsnxConfig cfg = {};
+    WgnxConfig cfg = {};
     cfg.control_url = "https://127.0.0.1:9";
     cfg.hostname = "runtime-test";
     cfg.machine_key = machine;
     cfg.node_key = node;
     cfg.disco_key = disco;
-    TsnxEngine *engine = tsnx_engine_new(&cfg, tsnx_driver_now_ns(), static_cast<uint64_t>(time(nullptr)));
-    TsnxDriver *driver = tsnx_driver_new(engine, nullptr, nullptr);
+    WgnxEngine *engine = wgnx_engine_new(&cfg, wgnx_driver_now_ns(), static_cast<uint64_t>(time(nullptr)));
+    WgnxDriver *driver = wgnx_driver_new(engine, nullptr, nullptr);
     std::string error;
     auto rt = Runtime::Adopt(engine, driver, &error);
     assert(rt);
-    std::thread loop([&] { rt->Run([](TsnxDriver *) {}); });
+    std::thread loop([&] { rt->Run([](WgnxDriver *) {}); });
 
     rt->RequestSuspended(Runtime::kPaused, true);
     assert(WaitSuspended(*rt, true));
@@ -63,8 +63,8 @@ int main() {
     rt->Stop();
     loop.join();
     rt.reset();
-    tsnx_driver_free(driver);
-    tsnx_engine_free(engine);
+    wgnx_driver_free(driver);
+    wgnx_engine_free(engine);
     std::puts("runtime tests passed");
     return 0;
 }

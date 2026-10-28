@@ -1,10 +1,10 @@
 # Local tailnet for end-to-end tests: headscale (control + DERP + STUN) and a
-# stock tailscaled peer with echo services. tsnx clients join with the
+# stock tailscaled peer with echo services. wgnx clients join with the
 # pre-auth key written to state/authkey by setup.sh.
-name: tsnx-e2e
+name: wgnx-e2e
 
 networks:
-  tsnx:
+  wgnx:
     ipam:
       config:
         - subnet: 172.30.0.0/24
@@ -19,7 +19,7 @@ services:
       - ./state/certs:/certs:ro
       - ./state/headscale:/var/lib/headscale
     networks:
-      tsnx:
+      wgnx:
         ipv4_address: 172.30.0.10
     ports:
       - "127.0.0.1:8443:443"
@@ -48,7 +48,7 @@ services:
       - /dev/net/tun:/dev/net/tun
     cap_add: [NET_ADMIN, NET_RAW]
     networks:
-      tsnx:
+      wgnx:
         ipv4_address: 172.30.0.20
     depends_on:
       headscale:
@@ -84,38 +84,38 @@ services:
     depends_on: [peer]
     profiles: [peer]
 
-  # tsnx-host built for Linux and run on the compose network, so direct UDP
+  # wgnx-host built for Linux and run on the compose network, so direct UDP
   # paths to peer1 are possible (the Mac cannot reach container IPs).
-  # Build:  docker compose run --rm tsnx-build
-  # Run:    docker compose run --rm tsnx up --control https://headscale ...
-  tsnx-build:
-    image: tsnx-e2e-client
+  # Build:  docker compose run --rm wgnx-build
+  # Run:    docker compose run --rm wgnx up --control https://headscale ...
+  wgnx-build:
+    image: wgnx-e2e-client
     build: { context: ., dockerfile: Dockerfile.client }
     working_dir: /src
     volumes:
       - ..:/src
-      - tsnx-cargo:/usr/local/cargo/registry
+      - wgnx-cargo:/usr/local/cargo/registry
     environment:
       CARGO_TARGET_DIR: /src/target/linux
     entrypoint: ["/src/e2e/build-linux.sh"]
-    profiles: [tsnx]
+    profiles: [wgnx]
 
-  tsnx:
-    image: tsnx-e2e-client
+  wgnx:
+    image: wgnx-e2e-client
     build: { context: ., dockerfile: Dockerfile.client }
     working_dir: /src
     volumes:
       - ..:/src:ro
       - ./state:/state
     environment:
-      TSNX_EXTRA_ROOT: /state/certs/ca.der
+      WGNX_EXTRA_ROOT: /state/certs/ca.der
       RUST_LOG: ${RUST_LOG:-info}
-    entrypoint: ["/src/target/linux/bin/tsnx-host"]
+    entrypoint: ["/src/target/linux/bin/wgnx-host"]
     cap_add: [NET_ADMIN]
     networks:
-      tsnx:
+      wgnx:
         ipv4_address: 172.30.0.30
-    profiles: [tsnx]
+    profiles: [wgnx]
 
 volumes:
-  tsnx-cargo:
+  wgnx-cargo:

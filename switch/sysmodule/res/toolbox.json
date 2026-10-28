@@ -1,5 +1,5 @@
 {
-    "name": "tailscale-nx",
-    "tid": "0x4200000000005453",
+    "name": "wireguard-nx",
+    "tid": "0x4200000000005747",
     "requires_reboot": true
 }

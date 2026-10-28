@@ -1,8 +1,8 @@
-// tsnx-app: homebrew front end for the tsnx engine.
+// wgnx-app: homebrew front end for the wgnx engine.
 //
-// Joins the tailnet configured in sdmc:/config/tailscale-nx/config.ini and
+// Joins the tailnet configured in sdmc:/config/wireguard-nx/config.ini and
 // shows status. Buttons: Y = echo self-test against `echo_test` peer,
-// X = crypto benchmark, + = exit. Run with `nxlink -s tsnx-app.nro` to stream
+// X = crypto benchmark, + = exit. Run with `nxlink -s wgnx-app.nro` to stream
 // the log back to the development machine.
 //
 // config.ini:
@@ -10,7 +10,7 @@
 //   auth_key=tskey-auth-...        (optional; otherwise a login URL is shown)
 //   hostname=switch
 //   echo_test=100.64.0.1           (optional; a peer running TCP/UDP echo on port 7)
-//   ca_cert=sdmc:/config/tailscale-nx/ca.der  (optional extra trusted root, DER)
+//   ca_cert=sdmc:/config/wireguard-nx/ca.der  (optional extra trusted root, DER)
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -19,11 +19,11 @@
 
 #include <switch.h>
 
-#include "tsnx.h"
-#include "tsnx_app.h"
-#include "tsnx_driver.h"
+#include "wgnx.h"
+#include "wgnx_app.h"
+#include "wgnx_driver.h"
 
-#define CONFIG_DIR "sdmc:/config/tailscale-nx"
+#define CONFIG_DIR "sdmc:/config/wireguard-nx"
 #define CONFIG_PATH CONFIG_DIR "/config.ini"
 #define STATE_PATH CONFIG_DIR "/state"
 
@@ -35,10 +35,10 @@ typedef struct {
     char ca_cert[256];
 } Config;
 
-void tsnx_platform_random(uint8_t *buf, size_t len) { randomGet(buf, len); }
+void wgnx_platform_random(uint8_t *buf, size_t len) { randomGet(buf, len); }
 
-_Noreturn void tsnx_platform_panic(const uint8_t *msg, size_t len) {
-    printf("\nPANIC in tsnx core: %.*s\n", (int)len, (const char *)msg);
+_Noreturn void wgnx_platform_panic(const uint8_t *msg, size_t len) {
+    printf("\nPANIC in wgnx core: %.*s\n", (int)len, (const char *)msg);
     consoleUpdate(NULL);
     fflush(stdout);
     svcSleepThread(5000000000ULL);
@@ -78,7 +78,7 @@ static void write_example_config(void) {
     mkdir(CONFIG_DIR, 0777);
     FILE *f = fopen(CONFIG_PATH, "w");
     if (!f) return;
-    fputs("# tailscale-nx configuration\n"
+    fputs("# wireguard-nx configuration\n"
           "control_url=https://controlplane.tailscale.com\n"
           "# auth_key=tskey-auth-...\n"
           "hostname=nintendo-switch\n"
@@ -100,40 +100,40 @@ static uint8_t *read_file(const char *path, size_t *len) {
 }
 
 // For saving a replaced node key from on_event.
-static TsnxEngine *g_engine;
+static WgnxEngine *g_engine;
 
-static void on_event(void *ctx, const TsnxEvent *ev) {
+static void on_event(void *ctx, const WgnxEvent *ev) {
     int *peers = ctx;
     switch (ev->kind) {
-        case TSNX_EVENT_NODE_KEY: {
+        case WGNX_EVENT_NODE_KEY: {
             uint8_t node[32];
-            tsnx_engine_node_key(g_engine, node);
-            if (tsnx_state_set_node(STATE_PATH, node) != 0) printf("\x1b[31mcannot save the new node key\x1b[0m\n");
+            wgnx_engine_node_key(g_engine, node);
+            if (wgnx_state_set_node(STATE_PATH, node) != 0) printf("\x1b[31mcannot save the new node key\x1b[0m\n");
             break;
         }
-        case TSNX_EVENT_LOGIN_URL:
+        case WGNX_EVENT_LOGIN_URL:
             printf("\x1b[33mLogin required:\x1b[0m open\n  %s\non another device.\n", ev->text);
             break;
-        case TSNX_EVENT_AUTHORIZED:
+        case WGNX_EVENT_AUTHORIZED:
             printf("\x1b[32mAuthorized.\x1b[0m\n");
             break;
-        case TSNX_EVENT_ADDRESSES:
+        case WGNX_EVENT_ADDRESSES:
             printf("Tailnet address: \x1b[36m%s\x1b[0m\n", ev->text);
             break;
-        case TSNX_EVENT_PEERS:
+        case WGNX_EVENT_PEERS:
             *peers = (int)ev->value;
             printf("Peers: %u\n", ev->value);
             break;
-        case TSNX_EVENT_HOME_DERP:
+        case WGNX_EVENT_HOME_DERP:
             printf("Home DERP region: %u\n", ev->value);
             break;
-        case TSNX_EVENT_ENDPOINTS:
+        case WGNX_EVENT_ENDPOINTS:
             printf("Endpoints: %s\n", ev->text);
             break;
-        case TSNX_EVENT_PEER_PATH:
+        case WGNX_EVENT_PEER_PATH:
             printf("Path: %s\n", ev->text);
             break;
-        case TSNX_EVENT_ERROR:
+        case WGNX_EVENT_ERROR:
             printf("\x1b[31m%s\x1b[0m\n", ev->text);
             break;
         default:
@@ -145,7 +145,7 @@ static void on_event(void *ctx, const TsnxEvent *ev) {
 // user-set clock.
 static uint64_t console_unix_time(void) {
     u64 t = 0;
-    if (R_SUCCEEDED(timeGetCurrentTime(TimeType_NetworkSystemClock, &t)) && t > (u64)TSNX_BUILD_UNIX) return t;
+    if (R_SUCCEEDED(timeGetCurrentTime(TimeType_NetworkSystemClock, &t)) && t > (u64)WGNX_BUILD_UNIX) return t;
     if (R_SUCCEEDED(timeGetCurrentTime(TimeType_UserSystemClock, &t))) return t;
     return (uint64_t)time(NULL);
 }
@@ -169,11 +169,11 @@ static void run_bench(void) {
     const size_t packet_len = 1400;
     const u32 packets = 4000;
     u64 start = armGetSystemTick();
-    tsnx_bench_aead(packet_len, packets);
+    wgnx_bench_aead(packet_len, packets);
     double secs = (double)armTicksToNs(armGetSystemTick() - start) / 1e9;
     printf("chacha20poly1305: %.1f Mbit/s\n", (double)(packet_len * packets) * 8.0 / secs / 1e6);
     start = armGetSystemTick();
-    tsnx_bench_x25519(200);
+    wgnx_bench_x25519(200);
     secs = (double)armTicksToNs(armGetSystemTick() - start) / 1e9;
     printf("x25519: %.0f ops/s\n", 200 / secs);
 }
@@ -188,15 +188,15 @@ int main(int argc, char **argv) {
 
     Result rc = socketInitializeDefault();
     if (R_SUCCEEDED(rc)) nxlinkStdio();
-    printf("tailscale-nx %s\n", tsnx_version());
+    printf("wireguard-nx %s\n", wgnx_version());
     // Core log lines at info level and above (netcheck, paths, recoveries).
-    tsnx_set_log_callback(log_line, 3);
+    wgnx_set_log_callback(log_line, 3);
 
     u8 seed[32];
     randomGet(seed, sizeof seed);
-    tsnx_seed_rng(seed);
-    u32 st = tsnx_selftest();
-    if (st != TSNX_SELFTEST_OK) printf("\x1b[31mcrypto selftest FAILED (%u)\x1b[0m\n", st);
+    wgnx_seed_rng(seed);
+    u32 st = wgnx_selftest();
+    if (st != WGNX_SELFTEST_OK) printf("\x1b[31mcrypto selftest FAILED (%u)\x1b[0m\n", st);
 
     Config cfg;
     if (load_config(&cfg) != 0) {
@@ -204,18 +204,18 @@ int main(int argc, char **argv) {
         printf("No config found; wrote an example to %s.\n", CONFIG_PATH);
     }
     uint8_t machine[32], node[32], disco[32];
-    TsnxEngine *engine = NULL;
-    TsnxDriver *driver = NULL;
+    WgnxEngine *engine = NULL;
+    WgnxDriver *driver = NULL;
     int peers = 0;
     if (R_FAILED(rc)) {
         printf("socketInitializeDefault failed: 0x%x\n", rc);
-    } else if (tsnx_state_load_or_create(STATE_PATH, machine, node, disco) != 0) {
+    } else if (wgnx_state_load_or_create(STATE_PATH, machine, node, disco) != 0) {
         printf("cannot read/write %s\n", STATE_PATH);
     } else {
         size_t ca_len = 0;
         uint8_t *ca = cfg.ca_cert[0] ? read_file(cfg.ca_cert, &ca_len) : NULL;
         if (cfg.ca_cert[0] && !ca) printf("cannot read ca_cert %s\n", cfg.ca_cert);
-        TsnxConfig ecfg = {
+        WgnxConfig ecfg = {
             .control_url = cfg.control_url,
             .auth_key = cfg.auth_key[0] ? cfg.auth_key : NULL,
             .hostname = cfg.hostname,
@@ -228,7 +228,7 @@ int main(int argc, char **argv) {
         printf("Control: %s, hostname %s\n", cfg.control_url, cfg.hostname);
         uint64_t now_unix = console_unix_time();
         bool corrected = false;
-        uint64_t unix_time = tsnx_sane_unix_time(now_unix, cfg.control_url, &corrected);
+        uint64_t unix_time = wgnx_sane_unix_time(now_unix, cfg.control_url, &corrected);
         if (corrected) {
             printf("\x1b[33mConsole clock looks wrong (%s); using the server's time (%s).\n"
                    "Fix it with the QuickNTP overlay to avoid this.\x1b[0m\n",
@@ -239,16 +239,16 @@ int main(int argc, char **argv) {
                    fmt_date(now_unix));
             unix_time = now_unix;
         }
-        engine = g_engine = tsnx_engine_new(&ecfg, tsnx_driver_now_ns(), unix_time);
-        if (engine) driver = tsnx_driver_new(engine, on_event, &peers);
+        engine = g_engine = wgnx_engine_new(&ecfg, wgnx_driver_now_ns(), unix_time);
+        if (engine) driver = wgnx_driver_new(engine, on_event, &peers);
         if (!driver) printf("engine init failed\n");
         // Tailscale's default port; a stable port keeps NAT mappings stable.
-        if (driver && tsnx_driver_open_udp(driver, 41641) != 0 && tsnx_driver_open_udp(driver, 0) != 0)
+        if (driver && wgnx_driver_open_udp(driver, 41641) != 0 && wgnx_driver_open_udp(driver, 0) != 0)
             printf("no UDP socket: DERP relay only\n");
     }
     printf("\nY: echo test   X: benchmark   +: exit\n\n");
 
-    TsnxEcho echo;
+    WgnxEcho echo;
     bool echo_running = false;
     while (appletMainLoop()) {
         padUpdate(&pad);
@@ -256,22 +256,22 @@ int main(int argc, char **argv) {
         if (down & HidNpadButton_Plus) break;
         if (down & HidNpadButton_X) run_bench();
         if ((down & HidNpadButton_Y) && driver) {
-            TsnxAddr target;
-            if (!cfg.echo_test[0] || tsnx_parse_ipv4(cfg.echo_test, 7, &target) != 0) {
+            WgnxAddr target;
+            if (!cfg.echo_test[0] || wgnx_parse_ipv4(cfg.echo_test, 7, &target) != 0) {
                 printf("set echo_test=<peer ip> in config.ini\n");
             } else if (peers == 0) {
                 printf("not connected to the tailnet yet\n");
             } else {
                 printf("echo test against %s:7 ...\n", cfg.echo_test);
-                tsnx_echo_init(&echo, &target);
+                wgnx_echo_init(&echo, &target);
                 echo_running = true;
             }
         }
         if (driver) {
             // Short waits keep the UI responsive; the engine is event-driven.
-            if (tsnx_driver_run_once(driver, 16) != 0) printf("driver error\n");
+            if (wgnx_driver_run_once(driver, 16) != 0) printf("driver error\n");
             if (echo_running) {
-                int r = tsnx_echo_step(&echo, engine, tsnx_driver_now_ns());
+                int r = wgnx_echo_step(&echo, engine, wgnx_driver_now_ns());
                 if (r) {
                     printf(r > 0 ? "\x1b[32mecho test PASSED\x1b[0m\n" : "\x1b[31mecho test FAILED\x1b[0m\n");
                     echo_running = false;
@@ -281,8 +281,8 @@ int main(int argc, char **argv) {
         consoleUpdate(NULL);
     }
 
-    tsnx_driver_free(driver);
-    tsnx_engine_free(engine);
+    wgnx_driver_free(driver);
+    wgnx_engine_free(engine);
     socketExit();
     consoleExit(NULL);
     return 0;

@@ -1,5 +1,5 @@
 // Tailscale overlay: status, pause, stop/start and login (QR code) for the
-// tailscale-nx sysmodule, through its tsnx:ctl service (native/ctl/tsnx_ctl.h).
+// wireguard-nx sysmodule, through its wgnx:ctl service (native/ctl/wgnx_ctl.h).
 #define TESLA_INIT_IMPL
 #include <tesla.hpp>
 
@@ -13,15 +13,15 @@
 extern "C" {
 #include "qrcodegen.h"
 }
-#include "tsnx_ctl.h"
+#include "wgnx_ctl.h"
 
 namespace {
 
-    // ---- tsnx:ctl client -------------------------------------------------
+    // ---- wgnx:ctl client -------------------------------------------------
 
     // Atmosphère's sm makes a request for a service nobody has registered
     // wait until someone does (for boot ordering), so the overlay would hang
-    // when tailscale-nx isn't running: ask whether it exists first.
+    // when wireguard-nx isn't running: ask whether it exists first.
     bool ServiceExists(const char *name) {
         u8 has = 0;
         const SmServiceName sn = smEncodeName(name);
@@ -30,7 +30,7 @@ namespace {
         return R_SUCCEEDED(rc) && (has & 1);
     }
 
-    // Every tsnx:ctl request runs on this thread, so a sysmodule that doesn't
+    // Every wgnx:ctl request runs on this thread, so a sysmodule that doesn't
     // answer (busy, or stuck) can't freeze the overlay: the panel keeps its
     // last answer and says the sysmodule isn't responding. The UI thread
     // only reads the snapshot and posts requests.
@@ -40,10 +40,10 @@ namespace {
             bool valid = false;  // the thread has looked at least once
             bool have = false;   // a session is open
             bool status_ok = false;
-            TsnxCtlStatus status = {};
+            WgnxCtlStatus status = {};
             char login_url[256] = {};
             char last_error[192] = {};
-            TsnxCtlPeer peers[TSNX_CTL_MAX_PEERS] = {};
+            WgnxCtlPeer peers[WGNX_CTL_MAX_PEERS] = {};
             u32 peer_count = 0;  // active, which can be more than fit in peers
         };
 
@@ -98,9 +98,9 @@ namespace {
                 s.status_ok = R_SUCCEEDED(Call([] { return serviceDispatchOut(&g_session, 0, s.status); }));
                 if (!s.status_ok) Close();  // the process went away
             }
-            if (s.status_ok && s.status.state == TSNX_CTL_NEEDS_LOGIN) GetString(1, s.login_url, sizeof s.login_url);
+            if (s.status_ok && s.status.state == WGNX_CTL_NEEDS_LOGIN) GetString(1, s.login_url, sizeof s.login_url);
             if (s.status_ok) GetString(3, s.last_error, sizeof s.last_error);
-            if (s.status_ok && s.status.version >= 3 && s.status.state == TSNX_CTL_CONNECTED) {
+            if (s.status_ok && s.status.version >= 3 && s.status.state == WGNX_CTL_CONNECTED) {
                 u32 n = 0;
                 const Result rc = Call([&] {
                     return serviceDispatchOut(&g_session, 5, n, .buffer_attrs = {SfBufferAttr_HipcMapAlias | SfBufferAttr_Out},
@@ -125,7 +125,7 @@ namespace {
                     // around each use (libnx counts them, across threads too).
                     g_open = Call([] {
                         bool ok = false;
-                        tsl::hlp::doWithSmSession([&] { ok = ServiceExists(TSNX_CTL_SERVICE) && R_SUCCEEDED(smGetService(&g_session, TSNX_CTL_SERVICE)); });
+                        tsl::hlp::doWithSmSession([&] { ok = ServiceExists(WGNX_CTL_SERVICE) && R_SUCCEEDED(smGetService(&g_session, WGNX_CTL_SERVICE)); });
                         return ok;
                     });
                 }
@@ -193,19 +193,19 @@ namespace {
 
     bool g_have_ctl = false;
     bool g_valid = false;  // ctl::Snapshot::valid
-    TsnxCtlStatus g_status = {};
+    WgnxCtlStatus g_status = {};
     bool g_status_ok = false;
 
     // ---- stop and start ------------------------------------------------------
 
-    // Stop asks the sysmodule to end itself (tsnx:ctl Stop): it refuses
+    // Stop asks the sysmodule to end itself (wgnx:ctl Stop): it refuses
     // whenever exiting could disturb the console or an app. Start launches it
     // through pm. Neither touches its boot flag.
-    constexpr u64 SysmoduleProgramId = 0x4200000000005453;
-    constexpr const char DisabledPath[] = "sdmc:/config/tailscale-nx/disabled";
+    constexpr u64 SysmoduleProgramId = 0x4200000000005747;
+    constexpr const char DisabledPath[] = "sdmc:/config/wireguard-nx/disabled";
     // Our system tick, so the sysmodule's crash guard knows this start isn't
     // a boot.
-    constexpr const char StartRequestedPath[] = "sdmc:/config/tailscale-nx/start_requested";
+    constexpr const char StartRequestedPath[] = "sdmc:/config/wireguard-nx/start_requested";
 
     bool SysmoduleRunning() {
         u64 pid = 0;
@@ -250,7 +250,7 @@ namespace {
     void BeginStop() {
         if (!g_have_ctl || g_phase != Phase::Idle) return;
         if (g_status.version < 2) {
-            Say("This tailscale-nx is too old to stop here.", "Update it, or restart the console.");
+            Say("This wireguard-nx is too old to stop here.", "Update it, or restart the console.");
             return;
         }
         ctl::g_stop_done = false;
@@ -263,7 +263,7 @@ namespace {
     void FinishStop() {
         SetPhase(Phase::Idle);
         // A failed request most likely means it exited before replying.
-        if (R_FAILED(ctl::g_stop_rc) || ctl::g_stop_code == TSNX_CTL_STOP_OK) {
+        if (R_FAILED(ctl::g_stop_rc) || ctl::g_stop_code == WGNX_CTL_STOP_OK) {
             ctl::g_wanted = false;
             ctl::Wake();
             g_have_ctl = g_status_ok = false;
@@ -271,10 +271,10 @@ namespace {
             return;
         }
         switch (ctl::g_stop_code) {
-            case TSNX_CTL_STOP_HOMEBREW:
-                Say("Close homebrew apps first: they have", "connections through tailscale-nx.");
+            case WGNX_CTL_STOP_HOMEBREW:
+                Say("Close homebrew apps first: they have", "connections through wireguard-nx.");
                 break;
-            case TSNX_CTL_STOP_BUSY:
+            case WGNX_CTL_STOP_BUSY:
                 Say("Busy (sleep, wake or setting up).", "Try again in a moment.");
                 break;
             default:
@@ -301,7 +301,7 @@ namespace {
             return;
         }
         if (FileExists(DisabledPath)) {
-            Say("config/tailscale-nx/disabled keeps it off.", "Delete that file to start it.");
+            Say("config/wireguard-nx/disabled keeps it off.", "Delete that file to start it.");
             return;
         }
         tsl::hlp::doWithSDCardHandle([] {
@@ -340,8 +340,8 @@ namespace {
 
     // Why the sysmodule isn't running, read from the SD card when the overlay
     // opens (the crash guard's file, the kill switch, or a missing boot flag).
-    constexpr const char CrashedPath[] = "sdmc:/config/tailscale-nx/crashed";
-    constexpr const char Boot2Path[] = "sdmc:/atmosphere/contents/4200000000005453/flags/boot2.flag";
+    constexpr const char CrashedPath[] = "sdmc:/config/wireguard-nx/crashed";
+    constexpr const char Boot2Path[] = "sdmc:/atmosphere/contents/4200000000005747/flags/boot2.flag";
     char g_crashed[160] = {};   // first line of the crash guard's reason
     char g_not_started[200] = {};  // why it declined to start (too little memory)
     bool g_no_boot_flag = false;
@@ -356,7 +356,7 @@ namespace {
                 std::fclose(f);
             }
             g_not_started[0] = 0;
-            if (FILE *f = std::fopen("sdmc:/config/tailscale-nx/not_started", "r")) {
+            if (FILE *f = std::fopen("sdmc:/config/wireguard-nx/not_started", "r")) {
                 if (std::fgets(g_not_started, sizeof g_not_started, f)) g_not_started[std::strcspn(g_not_started, "\r\n")] = 0;
                 std::fclose(f);
             }
@@ -369,11 +369,11 @@ namespace {
         });
     }
 
-    // Clears the crash guard and starts tailscale-nx again.
+    // Clears the crash guard and starts wireguard-nx again.
     void TurnBackOn() {
         tsl::hlp::doWithSDCardHandle([] {
-            for (const char *p : {CrashedPath, "sdmc:/config/tailscale-nx/starting", "sdmc:/config/tailscale-nx/sleep_failures",
-                                  "sdmc:/config/tailscale-nx/sleeping"}) {
+            for (const char *p : {CrashedPath, "sdmc:/config/wireguard-nx/starting", "sdmc:/config/wireguard-nx/sleep_failures",
+                                  "sdmc:/config/wireguard-nx/sleeping"}) {
                 std::remove(p);
             }
         });
@@ -389,7 +389,7 @@ namespace {
                 break;
             case Phase::Exiting:
                 // Gone from pm and from sm: a new instance can register again.
-                if (!SysmoduleRunning() && !ServiceExists(TSNX_CTL_SERVICE)) {
+                if (!SysmoduleRunning() && !ServiceExists(WGNX_CTL_SERVICE)) {
                     ctl::g_wanted = true;
                     SetPhase(Phase::Idle);
                     ReadWhyNotRunning();
@@ -402,7 +402,7 @@ namespace {
                 if (!SysmoduleRunning()) {
                     SetPhase(Phase::Idle);
                     ReadWhyNotRunning();
-                    if (g_we_started) Say("It stopped right away. See", "config/tailscale-nx/sysmodule.log.");
+                    if (g_we_started) Say("It stopped right away. See", "config/wireguard-nx/sysmodule.log.");
                     g_we_started = false;
                 } else if (g_have_ctl) {  // the ctl thread opens the session
                     SetPhase(Phase::Idle);
@@ -419,10 +419,10 @@ namespace {
 
     char g_login_url[256] = {};
     char g_last_error[192] = {};
-    TsnxCtlPeer g_peers[TSNX_CTL_MAX_PEERS] = {};
-    u32 g_peer_count = 0;  // active; the first (up to TSNX_CTL_MAX_PEERS) are in g_peers
+    WgnxCtlPeer g_peers[WGNX_CTL_MAX_PEERS] = {};
+    u32 g_peer_count = 0;  // active; the first (up to WGNX_CTL_MAX_PEERS) are in g_peers
     u32 g_peers_shown = 0;  // how many are in g_peers, most recently used first
-    u8 g_by_name[TSNX_CTL_MAX_PEERS] = {};  // g_peers indices in name order
+    u8 g_by_name[WGNX_CTL_MAX_PEERS] = {};  // g_peers indices in name order
 
     // The login link as a QR code (encoded once per link).
     uint8_t g_qr[qrcodegen_BUFFER_LEN_MAX];
@@ -446,7 +446,7 @@ namespace {
         g_status = s.status;
         std::memcpy(g_peers, s.peers, sizeof g_peers);
         g_peer_count = s.peer_count;
-        g_peers_shown = std::min<u32>(g_peer_count, TSNX_CTL_MAX_PEERS);
+        g_peers_shown = std::min<u32>(g_peer_count, WGNX_CTL_MAX_PEERS);
         for (u32 i = 0; i < g_peers_shown; i++) g_by_name[i] = static_cast<u8>(i);
         // Listed by name, so rows stay put as traffic moves between peers.
         std::sort(g_by_name, g_by_name + g_peers_shown, [](u8 a, u8 b) { return std::strcmp(g_peers[a].name, g_peers[b].name) < 0; });
@@ -541,7 +541,7 @@ namespace {
     // How a peer is reached: "Direct 4 ms", or "via London 45 ms" when
     // relayed. Too wide for `w` pixels, the city is cut ("via Johanne...
     // 180 ms"), never the latency.
-    void PeerPath(tsl::gfx::Renderer *r, const TsnxCtlPeer &p, s32 w, char *out, size_t cap) {
+    void PeerPath(tsl::gfx::Renderer *r, const WgnxCtlPeer &p, s32 w, char *out, size_t cap) {
         char ms[12] = "";
         if (p.latency_ms) std::snprintf(ms, sizeof ms, " %u ms", p.latency_ms);
         const char *via = p.direct ? nullptr : RegionName(p.relay_region);
@@ -556,11 +556,11 @@ namespace {
         }
     }
 
-    tsl::Color PathColor(const TsnxCtlPeer &p) { return p.direct ? Green : Yellow; }
+    tsl::Color PathColor(const WgnxCtlPeer &p) { return p.direct ? Green : Yellow; }
 
     // No internet connection (not while paused or stopping: then it's moot).
     bool Offline() {
-        return (g_status.flags & TSNX_CTL_FLAG_OFFLINE) && g_status.state != TSNX_CTL_PAUSED && g_status.state != TSNX_CTL_STOPPING;
+        return (g_status.flags & WGNX_CTL_FLAG_OFFLINE) && g_status.state != WGNX_CTL_PAUSED && g_status.state != WGNX_CTL_STOPPING;
     }
 
     // Its engine loop hasn't run for a while (short pauses are normal: a
@@ -577,7 +577,7 @@ namespace {
         // The sysmodule hasn't answered a request: it's busy or stuck.
         if (const u64 busy = ctl::BusySeconds(); busy >= 2) {
             char since[64];
-            std::snprintf(since, sizeof since, "No reply from tailscale-nx for %llu seconds.", static_cast<unsigned long long>(busy));
+            std::snprintf(since, sizeof since, "No reply from wireguard-nx for %llu seconds.", static_cast<unsigned long long>(busy));
             r->drawString("Not responding", false, x + 20, y + 40, 30, r->a(Red));
             r->drawString(since, false, x + 20, y + 75, 17, r->a(Grey));
             r->drawString("Restart the console if this continues.", false, x + 20, y + 100, 17, r->a(Grey));
@@ -595,12 +595,12 @@ namespace {
         }
         if (g_status_ok) {
             switch (g_status.state) {
-                case TSNX_CTL_STARTING:    state = "Starting...";          color = Blue;   break;
-                case TSNX_CTL_NEEDS_LOGIN: state = "Log in needed";        color = Yellow; break;
-                case TSNX_CTL_CONNECTING:  state = g_status.ipv4[0] ? "Reconnecting..." : "Connecting..."; color = Blue; break;
-                case TSNX_CTL_CONNECTED:   state = "Connected";            color = Green;  break;
-                case TSNX_CTL_PAUSED:      state = "Paused";               color = Grey;   break;
-                case TSNX_CTL_STOPPING:    state = "Stopping...";          color = Grey;   break;
+                case WGNX_CTL_STARTING:    state = "Starting...";          color = Blue;   break;
+                case WGNX_CTL_NEEDS_LOGIN: state = "Log in needed";        color = Yellow; break;
+                case WGNX_CTL_CONNECTING:  state = g_status.ipv4[0] ? "Reconnecting..." : "Connecting..."; color = Blue; break;
+                case WGNX_CTL_CONNECTED:   state = "Connected";            color = Green;  break;
+                case WGNX_CTL_PAUSED:      state = "Paused";               color = Grey;   break;
+                case WGNX_CTL_STOPPING:    state = "Stopping...";          color = Grey;   break;
             }
             if (Offline()) {
                 state = "Offline";
@@ -614,7 +614,7 @@ namespace {
         char line[128];
         if (!g_status_ok) {
             if (g_crashed[0]) {
-                // "tailscale-nx stopped itself: <why>." -> show the reason.
+                // "wireguard-nx stopped itself: <why>." -> show the reason.
                 const char *why = std::strstr(g_crashed, ": ");
                 why = why ? why + 2 : g_crashed;
                 r->drawString("It turned itself off after failures:", false, x + 20, y + 75, 17, r->a(Grey));
@@ -624,13 +624,13 @@ namespace {
                 r->drawString("It didn't start: too little system memory.", false, x + 20, y + 75, 17, r->a(Grey));
                 r->drawString("Other sysmodules use the rest; turn one off.", false, x + 20, y + 100, 17, r->a(Grey));
             } else if (g_disabled) {
-                r->drawString("config/tailscale-nx/disabled keeps it off.", false, x + 20, y + 75, 17, r->a(Grey));
+                r->drawString("config/wireguard-nx/disabled keeps it off.", false, x + 20, y + 75, 17, r->a(Grey));
                 r->drawString("Delete that file to start it.", false, x + 20, y + 100, 17, r->a(Grey));
             } else if (g_no_boot_flag) {
-                r->drawString("The tailscale-nx sysmodule isn't running,", false, x + 20, y + 75, 17, r->a(Grey));
+                r->drawString("The wireguard-nx sysmodule isn't running,", false, x + 20, y + 75, 17, r->a(Grey));
                 r->drawString("and its boot setting in Sysmodules is off.", false, x + 20, y + 100, 17, r->a(Grey));
             } else {
-                r->drawString("The tailscale-nx sysmodule isn't running.", false, x + 20, y + 75, 17, r->a(Grey));
+                r->drawString("The wireguard-nx sysmodule isn't running.", false, x + 20, y + 75, 17, r->a(Grey));
                 r->drawString("It starts at boot, or with Start below.", false, x + 20, y + 100, 17, r->a(Grey));
             }
             return;
@@ -650,7 +650,7 @@ namespace {
         // Our address only while it's usable (it stays known while paused).
         s32 ly = y + 75;
         const u8 *ip = g_status.ipv4;
-        if (ip[0] && g_status.state == TSNX_CTL_CONNECTED) {
+        if (ip[0] && g_status.state == WGNX_CTL_CONNECTED) {
             std::snprintf(line, sizeof line, "%u.%u.%u.%u", ip[0], ip[1], ip[2], ip[3]);
             r->drawString(line, false, x + 20, ly, 20, r->a(White));
             ly += 27;
@@ -665,11 +665,11 @@ namespace {
                 if (region) std::snprintf(relay, sizeof relay, ", relay %s", region);
                 else std::snprintf(relay, sizeof relay, ", relay region %u", g_status.home_derp);
             }
-            std::snprintf(line, sizeof line, "%u peers%s%s", g_status.peers, relay, (g_status.flags & TSNX_CTL_FLAG_DIRECT) ? ", direct" : "");
+            std::snprintf(line, sizeof line, "%u peers%s%s", g_status.peers, relay, (g_status.flags & WGNX_CTL_FLAG_DIRECT) ? ", direct" : "");
         }
         r->drawString(line, false, x + 20, ly, 17, r->a(Grey));
         ly += 28;
-        if (g_last_error[0] && g_status.state != TSNX_CTL_CONNECTED && g_status.state != TSNX_CTL_PAUSED) {
+        if (g_last_error[0] && g_status.state != WGNX_CTL_CONNECTED && g_status.state != WGNX_CTL_PAUSED) {
             char error[sizeof g_last_error + 16];
             std::snprintf(error, sizeof error, "Last error: %s", g_last_error);
             DrawTwoLines(r, error, x + 20, ly, 15, Grey, 46);
@@ -678,7 +678,7 @@ namespace {
 
     // The login QR code, or what's active once connected.
     void DrawLogin(tsl::gfx::Renderer *r, s32 x, s32 y, s32 w, s32 h) {
-        if (g_status_ok && g_status.state == TSNX_CTL_NEEDS_LOGIN && g_qr_ok) {
+        if (g_status_ok && g_status.state == WGNX_CTL_NEEDS_LOGIN && g_qr_ok) {
             r->drawString("Scan to log in, then approve this Switch:", false, x + 20, y + 25, 17, r->a(White));
             const int n = qrcodegen_getSize(g_qr);
             const int quiet = 3, scale = std::max(1, std::min((w - 40) / (n + 2 * quiet), (h - 80) / (n + 2 * quiet)));
@@ -703,15 +703,15 @@ namespace {
             ty += 28;
         };
         if (!g_status_ok) return;
-        if (g_status.flags & TSNX_CTL_FLAG_MITM) line("Homebrew apps can reach tailnet addresses.", White);
-        if (g_status.flags & TSNX_CTL_FLAG_MAGICDNS) line("Tailnet names resolve (e.g. in Moonlight).", White);
-        if (g_status.state == TSNX_CTL_PAUSED) line("Paused: tailnet connections fail until resumed.", Grey);
+        if (g_status.flags & WGNX_CTL_FLAG_MITM) line("Homebrew apps can reach tailnet addresses.", White);
+        if (g_status.flags & WGNX_CTL_FLAG_MAGICDNS) line("Tailnet names resolve (e.g. in Moonlight).", White);
+        if (g_status.state == WGNX_CTL_PAUSED) line("Paused: tailnet connections fail until resumed.", Grey);
         if (g_status.memory_kb) {
             char mem[96];
             std::snprintf(mem, sizeof mem, "Memory: %u.%u MB. System free: %u.%u MB.", g_status.memory_kb / 1024,
                           g_status.memory_kb % 1024 * 10 / 1024, g_status.system_free_kb / 1024, g_status.system_free_kb % 1024 * 10 / 1024);
             // Little left for other modules: say so (it can crash the console).
-            line(mem, g_status.system_free_kb < TSNX_CTL_LOW_SYSTEM_FREE_KB ? Red : Grey);
+            line(mem, g_status.system_free_kb < WGNX_CTL_LOW_SYSTEM_FREE_KB ? Red : Grey);
         }
     }
 
@@ -725,7 +725,7 @@ namespace {
     }
 
     void DrawTip(tsl::gfx::Renderer *r, s32 x, s32 y, s32 w, s32 h) {
-        r->drawString("Stop ends tailscale-nx until the next boot.", false, x + 20, y + 25, 15, r->a(Grey));
+        r->drawString("Stop ends wireguard-nx until the next boot.", false, x + 20, y + 25, 15, r->a(Grey));
         r->drawString("To keep it off, turn off its boot setting", false, x + 20, y + 47, 15, r->a(Grey));
         r->drawString("in Sysmodules.", false, x + 20, y + 69, 15, r->a(Grey));
     }
@@ -733,8 +733,8 @@ namespace {
     // ---- settings -------------------------------------------------------------
 
     // Switches the sysmodule reads as marker files: present = off.
-    constexpr const char NoNoticePath[] = "sdmc:/config/tailscale-nx/no-connect-notice";
-    constexpr const char NoUpdateCheckPath[] = "sdmc:/config/tailscale-nx/no-update-check";
+    constexpr const char NoNoticePath[] = "sdmc:/config/wireguard-nx/no-connect-notice";
+    constexpr const char NoUpdateCheckPath[] = "sdmc:/config/wireguard-nx/no-update-check";
 
     bool MarkerExists(const char *path) {
         bool exists = false;
@@ -768,12 +768,12 @@ namespace {
         public:
             void draw(tsl::gfx::Renderer *r) override {
                 const s32 x = getX(), y = getY(), w = getWidth(), h = getHeight();
-                if (!g_status_ok || g_status.state != TSNX_CTL_CONNECTED) {
+                if (!g_status_ok || g_status.state != WGNX_CTL_CONNECTED) {
                     r->drawString("Not connected.", false, x + 20, y + 30, 17, r->a(Grey));
                     return;
                 }
                 if (g_status.version < 3) {
-                    r->drawString("This tailscale-nx is too old to list them.", false, x + 20, y + 30, 17, r->a(Grey));
+                    r->drawString("This wireguard-nx is too old to list them.", false, x + 20, y + 30, 17, r->a(Grey));
                     r->drawString("Update it to see its connections.", false, x + 20, y + 55, 17, r->a(Grey));
                     return;
                 }
@@ -793,7 +793,7 @@ namespace {
                 Follow(n);
                 const s32 top = y + RowsTop, visible = Visible(h);
                 for (u32 row = m_top; row < n && row < m_top + static_cast<u32>(visible); row++) {
-                    const TsnxCtlPeer &p = g_peers[g_by_name[row]];
+                    const WgnxCtlPeer &p = g_peers[g_by_name[row]];
                     const s32 ry = top + static_cast<s32>(row - m_top) * RowHeight;
                     if (row == m_sel) {
                         r->drawRect(x + 6, ry, w - 12, RowHeight, r->a(Selected));  // a 2-pixel border
@@ -916,7 +916,7 @@ namespace {
             static constexpr u32 NameTurn = 0, PathTurn = 1;
 
             u32 m_sel = 0, m_top = 0;
-            char m_sel_name[sizeof(TsnxCtlPeer::name)] = {};
+            char m_sel_name[sizeof(WgnxCtlPeer::name)] = {};
             s32 m_scroll = 0, m_wait = 0;
             u32 m_turn = NameTurn;
             u32 m_repeat = 0;
@@ -944,12 +944,12 @@ namespace {
         public:
             tsl::elm::Element *createUI() override {
                 Refresh();
-                auto *frame = new tsl::elm::OverlayFrame("Tailscale", "tailscale-nx " APP_VERSION);
+                auto *frame = new tsl::elm::OverlayFrame("Tailscale", "wireguard-nx " APP_VERSION);
                 auto *list = new tsl::elm::List();
                 list->addItem(new Drawer(DrawStatus), 135);
                 if (!g_status_ok) ReadWhyNotRunning();
 
-                m_toggle = new tsl::elm::ToggleListItem("Tailscale", !(g_status_ok && g_status.state == TSNX_CTL_PAUSED));
+                m_toggle = new tsl::elm::ToggleListItem("Tailscale", !(g_status_ok && g_status.state == WGNX_CTL_PAUSED));
                 m_toggle->setStateChangedListener([](bool on) {
                     CtlSetPaused(!on);
                     Refresh();
@@ -1003,7 +1003,7 @@ namespace {
                 if (++m_frames % 30 != 0) return;
                 Poll();
                 Refresh();
-                const bool on = !(g_status_ok && g_status.state == TSNX_CTL_PAUSED);
+                const bool on = !(g_status_ok && g_status.state == WGNX_CTL_PAUSED);
                 if (m_toggle && !ctl::g_pause_pending && m_toggle->getState() != on) m_toggle->setState(on);
                 if (m_peers) {
                     const std::string value = PeersValue();
@@ -1025,13 +1025,13 @@ namespace {
             enum class Action { None, Stop, Start, TurnBackOn };
 
             static std::string PeersValue() {
-                if (!g_status_ok || g_status.state != TSNX_CTL_CONNECTED || g_status.version < 3) return "";
+                if (!g_status_ok || g_status.state != WGNX_CTL_CONNECTED || g_status.version < 3) return "";
                 return g_peer_count ? std::to_string(g_peer_count) + " active" : "None";
             }
 
             static Action PowerAction() {
                 if (g_phase != Phase::Idle) return Action::None;
-                if (g_have_ctl && g_status_ok) return g_status.state == TSNX_CTL_STOPPING ? Action::None : Action::Stop;
+                if (g_have_ctl && g_status_ok) return g_status.state == WGNX_CTL_STOPPING ? Action::None : Action::Stop;
                 if (SysmoduleRunning()) return Action::None;
                 return g_crashed[0] ? Action::TurnBackOn : Action::Start;
             }
@@ -1043,8 +1043,8 @@ namespace {
                     case Phase::Starting: return "Starting...";
                     case Phase::Idle:     break;
                 }
-                if (g_have_ctl && g_status_ok) return g_status.state == TSNX_CTL_STOPPING ? "Restart the console to finish" : "Stop tailscale-nx";
-                return g_crashed[0] ? "Turn back on" : "Start tailscale-nx";
+                if (g_have_ctl && g_status_ok) return g_status.state == WGNX_CTL_STOPPING ? "Restart the console to finish" : "Stop wireguard-nx";
+                return g_crashed[0] ? "Turn back on" : "Start wireguard-nx";
             }
 
             tsl::elm::ToggleListItem *m_toggle = nullptr;

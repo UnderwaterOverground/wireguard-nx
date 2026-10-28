@@ -10,14 +10,14 @@
 #pragma once
 
 extern "C" {
-#include "tsnx.h"
+#include "wgnx.h"
 }
 
 namespace ams::hosts {
 
     // Builds the managed block from the engine's current peers (call with
     // the runtime lock held). Returns whether it changed, for Write().
-    bool Collect(TsnxEngine *engine);
+    bool Collect(WgnxEngine *engine);
 
     // Rewrites the managed block with what Collect() built, without the
     // runtime lock: it reads and rewrites a file on the SD card, which can

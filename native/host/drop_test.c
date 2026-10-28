@@ -1,4 +1,4 @@
-// Tests for tsnx_drop.c on a temporary folder (make drop-test).
+// Tests for wgnx_drop.c on a temporary folder (make drop-test).
 #include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -6,18 +6,18 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-#include "tsnx_drop.h"
+#include "wgnx_drop.h"
 
 static uint64_t fake_free = UINT64_MAX;
 static int full_after = -1;  // fail writes with "disk full" after this many bytes
 static int real_space(const char *p, uint64_t *f, uint64_t *t) {
-    int rc = tsnx_posix_fs.space(p, f, t);
+    int rc = wgnx_posix_fs.space(p, f, t);
     if (fake_free != UINT64_MAX) *f = fake_free, *t = 100000000;
     return rc;
 }
 static int limited_write(void *f, uint64_t off, const uint8_t *d, size_t n) {
     if (full_after >= 0 && off + n > (uint64_t)full_after) return 1;
-    return tsnx_posix_fs.write(f, off, d, n);
+    return wgnx_posix_fs.write(f, off, d, n);
 }
 
 static char last[512];
@@ -33,7 +33,7 @@ static int exists(const char *dir, const char *name) {
     return stat(p, &st) == 0;
 }
 
-static int send_file(TsnxDropSink *s, const char *name, const char *data, int declare) {
+static int send_file(WgnxDropSink *s, const char *name, const char *data, int declare) {
     char why[160] = "";
     size_t len = strlen(data);
     int st = s->open(s->ctx, name, declare ? len : UINT64_MAX, "laptop", why, sizeof why);
@@ -46,15 +46,15 @@ static int send_file(TsnxDropSink *s, const char *name, const char *data, int de
 }
 
 int main(void) {
-    char base[] = "/tmp/tsnx-drop-XXXXXX";
+    char base[] = "/tmp/wgnx-drop-XXXXXX";
     assert(mkdtemp(base));
     char dir[256];
     snprintf(dir, sizeof dir, "%s/Taildrop", base);
-    TsnxFs fs = tsnx_posix_fs;
+    WgnxFs fs = wgnx_posix_fs;
     fs.space = real_space;
     fs.write = limited_write;
-    TsnxDropDir state;
-    TsnxDropSink s = tsnx_drop_dir(&state, &fs, dir, on_result, NULL);
+    WgnxDropDir state;
+    WgnxDropSink s = wgnx_drop_dir(&state, &fs, dir, on_result, NULL);
 
     // Creates the folder, saves, never overwrites.
     assert(send_file(&s, "a.txt", "hello", 1) == 0 && exists(dir, "a.txt"));
@@ -94,8 +94,8 @@ int main(void) {
     snprintf(dir2, sizeof dir2, "%s/NotADir", base);
     FILE *f = fopen(dir2, "w");
     fclose(f);
-    TsnxDropDir state2;
-    TsnxDropSink s2 = tsnx_drop_dir(&state2, &fs, dir2, on_result, NULL);
+    WgnxDropDir state2;
+    WgnxDropSink s2 = wgnx_drop_dir(&state2, &fs, dir2, on_result, NULL);
     assert(send_file(&s2, "a.txt", "x", 1) == 500 && strstr(last, "can't create its") != NULL);
 
     // An unwritable folder: refused cleanly.

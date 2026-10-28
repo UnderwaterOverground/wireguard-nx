@@ -1,17 +1,17 @@
-# tailscale-nx
+# wireguard-nx
 
-[![Release](https://img.shields.io/github/v/release/UnderwaterOverground/tailscale-nx)](https://github.com/UnderwaterOverground/tailscale-nx/releases/latest)
+[![Release](https://img.shields.io/github/v/release/UnderwaterOverground/wireguard-nx)](https://github.com/UnderwaterOverground/wireguard-nx/releases/latest)
 [![License](https://img.shields.io/badge/license-GPL--2.0%20%2F%20BSD--3-blue)](#license)
 [![Discord](https://img.shields.io/badge/Discord-join-5865F2?logo=discord&logoColor=white)](https://discord.gg/GjUuBEqRYb)
 
-**Tailscale for the Nintendo Switch.** tailscale-nx runs in the background
+**Tailscale for the Nintendo Switch.** wireguard-nx runs in the background
 on a Switch with Atmosphère and puts it on your
 [Tailscale](https://tailscale.com) network (your *tailnet*). Homebrew such as
 [Moonlight](https://github.com/XITRIX/Moonlight-Switch) can then reach your
 PC, NAS and other devices by their tailnet address or name, from anywhere,
 without opening ports on your router.
 
-> tailscale-nx is an unofficial, community project. It is not affiliated
+> wireguard-nx is an unofficial, community project. It is not affiliated
 > with or endorsed by Tailscale Inc. or Nintendo.
 
 ## Features
@@ -63,8 +63,8 @@ You need:
 
 ### 1. Download
 
-Open the [latest release](https://github.com/UnderwaterOverground/tailscale-nx/releases/latest)
-and, under **Assets**, download **`tailscale-nx-<version>.zip`** (not "Source
+Open the [latest release](https://github.com/UnderwaterOverground/wireguard-nx/releases/latest)
+and, under **Assets**, download **`wireguard-nx-<version>.zip`** (not "Source
 code"). Unzip it. Inside are three folders: **`atmosphere`**, **`config`**
 and **`switch`**.
 
@@ -86,20 +86,20 @@ deleted.
 
   | From the zip | Drag it into this folder on the SD card |
   |---|---|
-  | `atmosphere/contents/4200000000005453` | `atmosphere/contents` |
-  | `switch/.overlays/tailscale-nx.ovl` | `switch/.overlays` |
+  | `atmosphere/contents/4200000000005747` | `atmosphere/contents` |
+  | `switch/.overlays/wireguard-nx.ovl` | `switch/.overlays` |
 
   Folders starting with a dot are hidden on a Mac: press
   **Cmd + Shift + .** in Finder to show them. If Finder asks whether to
   replace an older version, choose **Replace**.
 
 **Check it:** the SD card should now have these two files. If there's a
-folder called `tailscale-nx-…` on the card, the files are in the wrong place:
+folder called `wireguard-nx-…` on the card, the files are in the wrong place:
 move its contents out to the top of the card.
 
 ```
-atmosphere/contents/4200000000005453/exefs.nsp
-switch/.overlays/tailscale-nx.ovl
+atmosphere/contents/4200000000005747/exefs.nsp
+switch/.overlays/wireguard-nx.ovl
 ```
 
 Put the SD card back in the Switch and turn it on as you normally would.
@@ -126,7 +126,7 @@ expiry**.
 - **No notification after a few minutes:** check the two files above are in
   exactly those places, and that you restarted the Switch (not just put it to
   sleep and woke it).
-- **There's no Tailscale in Ultrahand's menu:** `tailscale-nx.ovl` isn't in
+- **There's no Tailscale in Ultrahand's menu:** `wireguard-nx.ovl` isn't in
   `switch/.overlays`.
 - **Something else:** see [troubleshooting](docs/SETUP.md#troubleshooting).
 
@@ -166,7 +166,7 @@ picks 35 Mbit/s for 1080p, so lower it to around 25.
   files).
 - The Switch connects to the internet over **IPv4 only** (tailnet IPv6
   addresses work).
-- To stop tailscale-nx while it runs, use **Stop** in its own overlay
+- To stop wireguard-nx while it runs, use **Stop** in its own overlay
   (close homebrew apps first). The Sysmodules overlay can't stop it: turning
   it off there takes a restart.
 - Tested on one Mariko Switch. Reports from other models and firmware
@@ -182,11 +182,11 @@ servers in place.
 **The console crashes (orange screen) when I wake it during a Moonlight
 stream.** That's a Moonlight-Switch bug
 ([#306](https://github.com/XITRIX/Moonlight-Switch/issues/306)), and it
-happens with tailscale-nx turned off too. Until it's fixed, end the stream
+happens with wireguard-nx turned off too. Until it's fixed, end the stream
 before putting the console to sleep.
 
 **Artemis won't open a second time.** After a stream, Artemis can't start
-again from the same hbmenu session, with or without tailscale-nx. Close
+again from the same hbmenu session, with or without wireguard-nx. Close
 hbmenu from the HOME menu and open it again.
 
 **Is my traffic private?** Like the official Tailscale clients, tailnet
@@ -196,8 +196,8 @@ possible.
 
 **Something's wrong.** See [troubleshooting](docs/SETUP.md#troubleshooting).
 For help, ask on [Discord](https://discord.gg/GjUuBEqRYb) or
-[open an issue](https://github.com/UnderwaterOverground/tailscale-nx/issues).
-Please include the log, `config/tailscale-nx/sysmodule.log` on the SD card.
+[open an issue](https://github.com/UnderwaterOverground/wireguard-nx/issues).
+Please include the log, `config/wireguard-nx/sysmodule.log` on the SD card.
 
 ## Building
 
@@ -206,7 +206,7 @@ and most of it can be tested on a computer without a Switch.
 
 ## Credits
 
-tailscale-nx builds on:
+wireguard-nx builds on:
 - **[tailscale-rs](https://github.com/tailscale/tailscale-rs):** Tailscale's
   Rust components (WireGuard, keys, disco).
 - **Libraries:**
@@ -234,5 +234,5 @@ See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for licences.
 
 ## Found it useful?
 
-If tailscale-nx helped you, a ⭐ on the repo is always appreciated. It's how
+If wireguard-nx helped you, a ⭐ on the repo is always appreciated. It's how
 we know it's helping someone.
