@@ -12,7 +12,7 @@ rust-version.workspace = true
 
 [dependencies]
 bytes.workspace = true
-crypto_box.workspace = true
+aead.workspace = true  # wgnx: for the Buffer impl, without crypto_box
 # tsnx: workspace version (default-features = false).
 stable_deref_trait.workspace = true
 yoke.workspace = true

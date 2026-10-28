@@ -15,7 +15,6 @@ thiserror.workspace = true
 zerocopy.workspace = true
 serde = { workspace = true, optional = true }
 x25519-dalek.workspace = true
-crypto_box.workspace = true
 zeroize.workspace = true
 # tsnx: randomness for key generation comes from the injected ts_util::rng hook.
 ts_util.workspace = true

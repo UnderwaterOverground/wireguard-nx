@@ -2,7 +2,7 @@
 // (native/interpose/vsock_test.c) as ordinary homebrew, so its plain BSD
 // socket calls go through the sysmodule's bsd:u MITM. Output goes to nxlink.
 //
-//   nxlink -s mitm-test.nro <tailnet peer ip> [<non-tailnet ip:port>]
+//   nxlink -s mitm-test.nro <tunnel peer ip> [<ip:port outside the tunnel> [<our tunnel ip>]]
 //
 // The peer needs TCP+UDP echo on port 7 (tools/echo-server.py).
 #include <stdio.h>
@@ -20,7 +20,7 @@ int main(int argc, char **argv) {
     if (argc >= 2) {
         rc = vsock_test_main(argc, argv);
     } else {
-        printf("usage: nxlink -s mitm-test.nro <tailnet peer ip> [<ip:port>]\n");
+        printf("usage: nxlink -s mitm-test.nro <tunnel peer ip> [<ip:port> [<our ip>]]\n");
     }
     printf("exit %d\n", rc);
     socketExit();

@@ -1,5 +1,5 @@
-// wgnx:ctl: status, login link, pause and stop for clients like the overlay
-// (see native/ctl/wgnx_ctl.h). Runs on its own small server thread.
+// wgnx:ctl: status, peers, pause, config and stop for clients like the
+// overlay (see native/ctl/wgnx_ctl.h). Runs on its own small server thread.
 #pragma once
 
 #include <stratosphere.hpp>
@@ -8,9 +8,11 @@ namespace ams::ctl {
 
     // Handles a Stop request: returns WGNX_CTL_STOP_* and sets *detail.
     using StopHandler = u32 (*)(u32 *detail);
+    // Handles a SetConf request: returns WGNX_CTL_CONF_*.
+    using ConfHandler = u32 (*)(const char *name);
 
     // Registers the service and starts its thread. Logs and returns false
     // on failure (the sysmodule works without it).
-    bool Start(StopHandler stop);
+    bool Start(StopHandler stop, ConfHandler conf);
 
 }

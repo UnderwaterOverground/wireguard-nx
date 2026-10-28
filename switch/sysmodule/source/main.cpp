@@ -1,19 +1,18 @@
-// wireguard-nx sysmodule: runs the Tailscale engine from boot (boot2), so the
-// console is on the tailnet without any app open.
+// wireguard-nx sysmodule: runs the WireGuard engine from boot (boot2), so the
+// console is on its tunnel without any app open.
 //
 // It also MITMs bsd:u for homebrew (bsd_mitm.cpp), so their sockets reach
-// tailnet addresses through the engine (mitm=off in config.ini disables that).
+// tunnel addresses through the engine (mitm=off in config.ini disables that).
 //
 // Files (SD card):
-//   config/wireguard-nx/config.ini   shared with the app (control_url, auth_key,
-//                                    hostname, ca_cert, log_udp=<ip>:<port>,
+//   config/wireguard-nx/<name>.conf  wg-quick style tunnel configuration(s)
+//   config/wireguard-nx/config.ini   conf=<name>.conf (default: the only one,
+//                                    else wg0.conf), log_udp=<ip>:<port>,
 //                                    mitm=homebrew|homebrew,sys-ftpd|off,
-//                                    mitm_titles=<program IDs>,
-//                                    magicdns=on|off,
+//                                    mitm_titles=<program IDs>, hosts=on|off,
 //                                    overlay_budget_kb=<128..384>,
-//                                    connect_notice=on|off, taildrop=on|off,
-//                                    accept_routes=on|off, update_check=on|off)
-//   config/wireguard-nx/state        node keys, shared with the app
+//                                    connect_notice=on|off, update_check=on|off,
+//                                    tunnel_lan=on (tests: LAN through the tunnel)
 //   config/wireguard-nx/disabled     kill switch: if present, exit at boot
 //   config/wireguard-nx/no-update-check  the overlay's update check switch (off)
 //   config/wireguard-nx/crashed      written after 3 boots in a row that ended
@@ -58,7 +57,6 @@ extern "C" {
 #include "heap_size.h"
 #include "memory.hpp"
 #include "status.hpp"
-#include "taildrop.hpp"
 
 namespace ams {
 
@@ -66,7 +64,9 @@ namespace ams {
 
         constexpr const char ConfigDir[] = "sdmc:/config/wireguard-nx";
         constexpr const char ConfigPath[] = "sdmc:/config/wireguard-nx/config.ini";
-        constexpr const char StatePath[] = "sdmc:/config/wireguard-nx/state";
+        // A .conf is a few hundred bytes; 32 peers with names fit easily.
+        constexpr size_t ConfMaxSize = 8_KB;
+        constexpr const char DefaultConf[] = "wg0.conf";
         constexpr const char DisabledPath[] = "sdmc:/config/wireguard-nx/disabled";
         // Why we didn't start this time (too little system memory), for the
         // overlay; removed once we do start.
@@ -105,15 +105,14 @@ namespace ams {
         static_assert(MallocBufferSize % os::MemoryPageSize == 0);
         alignas(os::MemoryPageSize) constinit u8 g_malloc_buffer[MallocBufferSize];
 
-        // The engine's own sockets: control, DERP and the update check (TCP);
-        // WireGuard, DNS, the runtime's wake pair and the log (UDP). The
+        // The engine's own sockets: the update check (TCP); WireGuard, DNS,
+        // the runtime's wake pair and the log (UDP). The
         // transfer memory is the buffer pool for all of them: each socket's
         // buffers are taken from it, and one that doesn't fit fails with
         // ENOBUFS. UDP sockets start with a small receive buffer, as only
         // WireGuard's needs to be big, and it grows its own
         // (wgnx_driver.c): at 48 KB each, the small sockets took so much
-        // that once WireGuard had grown, a new DNS socket didn't fit, and
-        // after a pause or a wake the engine couldn't reach control. The
+        // that once WireGuard had grown, a new DNS socket didn't fit. The
         // pool keeps the size it had with 48 KB (sb_efficiency sockets'
         // worth), so WireGuard gets what the small sockets no longer take.
         constexpr u32 UdpRxPoolShare = 0xC000;
@@ -191,20 +190,20 @@ namespace ams {
         // While the console sleeps, logging must not touch the socket service
         // (it may be asleep and block the caller): file only.
         constinit std::atomic<bool> g_log_udp_paused = false;
-        // log_udp pointing at a tailnet address: lines queue here and the
+        // log_udp pointing at a tunnel address: lines queue here and the
         // engine loop sends them through the tunnel (works away from the LAN).
-        constinit bool g_log_tailnet = false;
-        constinit char g_tailnet_log[4_KB] = {};
-        constinit size_t g_tailnet_log_len = 0;
+        constinit bool g_log_tunnel = false;
+        constinit char g_tunnel_log[4_KB] = {};
+        constinit size_t g_tunnel_log_len = 0;
         // After a wake the tunnel needs a moment to re-handshake; lines sent
         // before then are lost, so hold them until this tick.
-        constinit u64 g_tailnet_log_hold_until_ns = 0;
+        constinit u64 g_tunnel_log_hold_until_ns = 0;
         // The engine loop's last round, to log stalls (0: not since resuming;
         // it doesn't run while suspended).
         constinit u64 g_last_round_ns = 0;
 
         // Runs a housekeeping step of the engine loop, logging it if it held
-        // the loop up (homebrew's tailnet sockets wait meanwhile).
+        // the loop up (homebrew's tunnel sockets wait meanwhile).
         template <class F>
         void Timed(const char *what, F &&f) {
             const u64 t0 = armTicksToNs(armGetSystemTick());
@@ -216,16 +215,16 @@ namespace ams {
         }
 
         // Appends a line, dropping the oldest whole lines to make room.
-        void QueueTailnetLog(const char *line, size_t n) {
-            if (n > sizeof g_tailnet_log) return;
-            while (g_tailnet_log_len + n > sizeof g_tailnet_log) {
-                const char *nl = static_cast<const char *>(std::memchr(g_tailnet_log, '\n', g_tailnet_log_len));
-                const size_t drop = nl ? static_cast<size_t>(nl - g_tailnet_log) + 1 : g_tailnet_log_len;
-                std::memmove(g_tailnet_log, g_tailnet_log + drop, g_tailnet_log_len - drop);
-                g_tailnet_log_len -= drop;
+        void QueueTunnelLog(const char *line, size_t n) {
+            if (n > sizeof g_tunnel_log) return;
+            while (g_tunnel_log_len + n > sizeof g_tunnel_log) {
+                const char *nl = static_cast<const char *>(std::memchr(g_tunnel_log, '\n', g_tunnel_log_len));
+                const size_t drop = nl ? static_cast<size_t>(nl - g_tunnel_log) + 1 : g_tunnel_log_len;
+                std::memmove(g_tunnel_log, g_tunnel_log + drop, g_tunnel_log_len - drop);
+                g_tunnel_log_len -= drop;
             }
-            std::memcpy(g_tailnet_log + g_tailnet_log_len, line, n);
-            g_tailnet_log_len += n;
+            std::memcpy(g_tunnel_log + g_tunnel_log_len, line, n);
+            g_tunnel_log_len += n;
         }
         constinit sockaddr_in g_log_udp_addr = {};
         // Lines logged before the UDP log socket exists, replayed once it does.
@@ -236,7 +235,7 @@ namespace ams {
         constinit bool g_early_log_done = false;
         // The engine thread, while the engine loop runs: its lines wait in
         // g_early_log until the loop has released the runtime lock (an SD
-        // write takes 5-9 ms, and homebrew's tailnet sockets wait on that
+        // write takes 5-9 ms, and homebrew's tunnel sockets wait on that
         // lock). Other threads write theirs directly, after any waiting.
         constinit os::ThreadType *g_log_defer_thread = nullptr;
 
@@ -257,8 +256,8 @@ namespace ams {
                 // Logging must never take the sysmodule down: ignore failures.
                 if (R_SUCCEEDED(fs::WriteFile(g_log_file, g_log_offset, lines, n, fs::WriteOption::Flush))) g_log_offset += n;
             }
-            if (g_log_tailnet) {
-                QueueTailnetLog(lines, n);
+            if (g_log_tunnel) {
+                QueueTunnelLog(lines, n);
             } else if (g_log_udp_fd >= 0 && g_early_log_done && !g_log_udp_paused) {
                 SendLogLines(lines, n);
             } else if (!g_early_log_done && g_early_log_len + n <= sizeof g_early_log) {
@@ -314,19 +313,15 @@ namespace ams {
         // ---- config ------------------------------------------------------
 
         struct Config {
-            char control_url[256] = "https://controlplane.tailscale.com";
-            char auth_key[256] = {};
-            char hostname[64] = "nintendo-switch";
-            char ca_cert[256] = {};
+            char conf[WGNX_CTL_CONF_NAME_MAX] = {};  // the .conf to use (file name in ConfigDir)
             char log_udp[64] = {};
             char mitm[32] = "homebrew";  // "homebrew,sys-ftpd" or "off"
             char mitm_titles[384] = {};  // forwarders' program IDs, served like homebrew
-            char magicdns[8] = "on";      // tailnet names in Atmosphere's hosts file, or "off"
-            char overlay_budget_kb[8] = {};  // tailnet socket buffers; default 320
+            char hosts[8] = "on";        // peer names in Atmosphere's hosts file, or "off"
+            char overlay_budget_kb[8] = {};  // tunnel socket buffers; default 320
             char connect_notice[8] = "on";   // toast with our address when first connected
-            char taildrop[8] = "on";         // receive files into sdmc:/Taildrop
-            char accept_routes[8] = "on";    // use peers' subnet routes
             char update_check[8] = "on";     // ask GitHub for a newer release at boot
+            char tunnel_lan[8] = {};         // "on": LAN addresses go through the tunnel too (tests)
         };
 
         void LoadConfig(Config &c) {
@@ -342,80 +337,70 @@ namespace ams {
                 auto set = [&](const char *key, char *dst, size_t cap) {
                     if (!std::strcmp(line, key)) util::SNPrintf(dst, cap, "%s", v);
                 };
-                set("control_url", c.control_url, sizeof c.control_url);
-                set("auth_key", c.auth_key, sizeof c.auth_key);
-                set("hostname", c.hostname, sizeof c.hostname);
-                set("ca_cert", c.ca_cert, sizeof c.ca_cert);
+                set("conf", c.conf, sizeof c.conf);
                 set("log_udp", c.log_udp, sizeof c.log_udp);
                 set("mitm", c.mitm, sizeof c.mitm);
                 set("mitm_titles", c.mitm_titles, sizeof c.mitm_titles);
-                set("magicdns", c.magicdns, sizeof c.magicdns);
+                set("hosts", c.hosts, sizeof c.hosts);
                 set("overlay_budget_kb", c.overlay_budget_kb, sizeof c.overlay_budget_kb);
                 set("connect_notice", c.connect_notice, sizeof c.connect_notice);
-                set("taildrop", c.taildrop, sizeof c.taildrop);
-                set("accept_routes", c.accept_routes, sizeof c.accept_routes);
                 set("update_check", c.update_check, sizeof c.update_check);
+                set("tunnel_lan", c.tunnel_lan, sizeof c.tunnel_lan);
             }
         }
 
-        // ---- node keys (same format as the app: machine=/node=/disco= hex) --
-
-        int HexNibble(char ch) {
-            if (ch >= '0' && ch <= '9') return ch - '0';
-            if (ch >= 'a' && ch <= 'f') return ch - 'a' + 10;
-            return -1;
-        }
-
-        bool ParseKey(const char *text, const char *name, u8 out[32]) {
-            char needle[16];
-            util::SNPrintf(needle, sizeof needle, "%s=", name);
-            const char *p = std::strstr(text, needle);
-            if (!p || (p != text && p[-1] != '\n')) return false;
-            p += std::strlen(needle);
-            for (int i = 0; i < 32; i++) {
-                const int hi = HexNibble(p[2 * i]), lo = HexNibble(p[2 * i + 1]);
-                if (hi < 0 || lo < 0) return false;
-                out[i] = static_cast<u8>(hi * 16 + lo);
+        // Rewrites (or adds) `key=value` in config.ini, keeping the rest.
+        void SetConfigValue(const char *key, const char *value) {
+            static char buf[2_KB], out[2_KB];
+            const s64 n = ReadWholeFile(ConfigPath, buf, sizeof buf);
+            if (n < 0) buf[0] = 0;
+            size_t o = 0;
+            bool done = false;
+            const size_t klen = std::strlen(key);
+            for (const char *line = buf; *line;) {
+                const char *eol = std::strchr(line, '\n');
+                const size_t len = eol ? static_cast<size_t>(eol - line) + 1 : std::strlen(line);
+                if (std::strncmp(line, key, klen) == 0 && line[klen] == '=') {
+                    if (!done) o += util::SNPrintf(out + o, sizeof out - o, "%s=%s\n", key, value);
+                    done = true;
+                } else if (o + len < sizeof out) {
+                    std::memcpy(out + o, line, len);
+                    o += len;
+                }
+                line += len;
             }
-            return true;
+            if (o && out[o - 1] != '\n' && o < sizeof out - 1) out[o++] = '\n';
+            if (!done) o += util::SNPrintf(out + o, sizeof out - o, "%s=%s\n", key, value);
+            if (!WriteWholeFile(ConfigPath, out, o)) Log("cannot write %s", ConfigPath);
         }
 
-        bool WriteKeys(const u8 machine[32], const u8 node[32], const u8 disco[32]) {
-            char out[256];
-            int n = 0;
-            auto put = [&](const char *name, const u8 *k) {
-                n += util::SNPrintf(out + n, sizeof out - n, "%s=", name);
-                for (int i = 0; i < 32; i++) n += util::SNPrintf(out + n, sizeof out - n, "%02x", k[i]);
-                n += util::SNPrintf(out + n, sizeof out - n, "\n");
-            };
-            put("machine", machine);
-            put("node", node);
-            put("disco", disco);
-            return WriteWholeFile(StatePath, out, n);
+        // A .conf file name: just a name (no directories), ending in .conf.
+        bool ValidConfName(const char *name) {
+            const size_t n = std::strlen(name);
+            if (n < 6 || n >= WGNX_CTL_CONF_NAME_MAX || std::strchr(name, '/') || std::strchr(name, '\\') || std::strstr(name, "..")) return false;
+            return std::strcmp(name + n - 5, ".conf") == 0;
         }
 
-        bool LoadOrCreateKeys(u8 machine[32], u8 node[32], u8 disco[32]) {
-            static char buf[1_KB];
-            bool have_m = false, have_n = false, have_d = false;
-            if (ReadWholeFile(StatePath, buf, sizeof buf) >= 0) {
-                have_m = ParseKey(buf, "machine", machine);
-                have_n = ParseKey(buf, "node", node);
-                have_d = ParseKey(buf, "disco", disco);
-                if (have_m && have_n && have_d) return true;
+        // Which .conf to use: config.ini's, else the only one there is, else
+        // wg0.conf.
+        void SelectConf(const Config &cfg, char *out, size_t cap) {
+            if (cfg.conf[0]) {
+                util::SNPrintf(out, cap, "%s%s", cfg.conf, std::strstr(cfg.conf, ".conf") ? "" : ".conf");
+                return;
             }
-            if (!have_m) os::GenerateRandomBytes(machine, 32);
-            if (!have_n) os::GenerateRandomBytes(node, 32);
-            if (!have_d) os::GenerateRandomBytes(disco, 32);
-            return WriteKeys(machine, node, disco);
-        }
-
-        // The engine replaced our expired node key (WGNX_EVENT_NODE_KEY): store
-        // it, or the next boot would come back with the expired one.
-        void SaveNodeKey(WgnxEngine *engine) {
-            u8 machine[32], node[32], disco[32];
-            if (!LoadOrCreateKeys(machine, node, disco)) return;
-            wgnx_engine_node_key(engine, node);
-            if (!WriteKeys(machine, node, disco)) Log("cannot save the new node key to %s", StatePath);
+            util::SNPrintf(out, cap, "%s", DefaultConf);
+            fs::DirectoryHandle dir;
+            if (R_FAILED(fs::OpenDirectory(std::addressof(dir), ConfigDir, fs::OpenDirectoryMode_File))) return;
+            ON_SCOPE_EXIT { fs::CloseDirectory(dir); };
+            static fs::DirectoryEntry entry;  // ~0x310 bytes: not on the stack
+            char only[WGNX_CTL_CONF_NAME_MAX] = {};
+            int found = 0;
+            s64 got = 0;
+            while (R_SUCCEEDED(fs::ReadDirectory(std::addressof(got), std::addressof(entry), dir, 1)) && got == 1) {
+                if (!ValidConfName(entry.name)) continue;
+                if (++found == 1) util::SNPrintf(only, sizeof only, "%s", entry.name);
+            }
+            if (found == 1) util::SNPrintf(out, cap, "%s", only);
         }
 
         // ---- network -----------------------------------------------------
@@ -467,7 +452,7 @@ namespace ams {
             return R_SUCCEEDED(nifmGetCurrentIpAddress(&ip)) ? ip : 0;
         }
 
-        // Tells the MITM our LAN (subnet routes overlapping it stay local).
+        // Tells the MITM our LAN (its addresses are reached directly).
         void SetLocalNet(u32 ip) {
             u32 cur = 0, mask = 0, gw = 0, dns1 = 0, dns2 = 0;
             unsigned len = 32;
@@ -560,21 +545,15 @@ namespace ams {
 
         const char *EventName(u32 kind) {
             switch (kind) {
-                case WGNX_EVENT_LOGIN_URL: return "login-url";
-                case WGNX_EVENT_AUTHORIZED: return "authorized";
                 case WGNX_EVENT_ADDRESSES: return "addresses";
                 case WGNX_EVENT_PEERS: return "peers";
-                case WGNX_EVENT_HOME_DERP: return "home-derp";
                 case WGNX_EVENT_ERROR: return "error";
-                case WGNX_EVENT_ENDPOINTS: return "endpoints";
-                case WGNX_EVENT_PEER_PATH: return "path";
-                case WGNX_EVENT_NODE_KEY: return "node-key";
-                case WGNX_EVENT_CONTROL: return "control";
+                case WGNX_EVENT_RESOLVE: return "resolve";
+                case WGNX_EVENT_HANDSHAKE: return "handshake";
+                case WGNX_EVENT_PEER_LOST: return "peer-lost";
                 default: return "log";
             }
         }
-
-        void OpenUdpLogSocket();
 
         void SetUpUdpLog(const char *target) {
             char host[48];
@@ -586,35 +565,52 @@ namespace ams {
             g_log_udp_addr.sin_family = AF_INET;
             g_log_udp_addr.sin_port = htons(static_cast<u16>(port));
             g_log_udp_addr.sin_addr.s_addr = inet_addr(host);
-            if ((ntohl(g_log_udp_addr.sin_addr.s_addr) & 0xffc00000u) == 0x64400000u) {
-                // A tailnet address (100.64.0.0/10): send through the engine.
-                std::scoped_lock lk(g_log_mutex);
-                g_log_tailnet = true;
-                QueueTailnetLog(g_early_log, g_early_log_len);
-                g_early_log_len = 0;
-                g_early_log_done = true;
+        }
+
+        // Once the tunnel's routes are known: a tunnel address gets its lines
+        // through the engine, anything else a real socket.
+        void StartUdpLog() {
+            if (g_log_udp_addr.sin_family != AF_INET) return;
+            const bool tunnel = ::wgnx::VSock::IsTunnel(reinterpret_cast<const sockaddr *>(std::addressof(g_log_udp_addr)));
+            std::scoped_lock lk(g_log_mutex);
+            if (tunnel == g_log_tunnel && (tunnel || g_log_udp_fd >= 0)) return;
+            g_log_tunnel = tunnel;
+            if (tunnel) {
+                if (g_log_udp_fd >= 0) ::close(g_log_udp_fd);
+                g_log_udp_fd = -1;
+                if (!g_early_log_done) {
+                    QueueTunnelLog(g_early_log, g_early_log_len);
+                    g_early_log_len = 0;
+                    g_early_log_done = true;
+                }
                 return;
             }
-            OpenUdpLogSocket();
+            const int fd = ::socket(AF_INET, SOCK_DGRAM, 0);
+            if (fd < 0) return;
+            // Send-only: keep its share of the socket buffer pool small.
+            const int rcv = 0x1000, snd = 0x2000;
+            ::setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &rcv, sizeof rcv);
+            ::setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &snd, sizeof snd);
+            g_log_udp_fd = fd;
         }
 
         // Sends queued log lines through the tunnel (engine loop, runtime lock
-        // held). Waits while we're not on the tailnet; lines from boot are
+        // held). Waits while we're not on the tunnel; lines from boot are
         // kept (the oldest dropped if the queue fills).
-        void FlushTailnetLog(WgnxEngine *engine) {
+        void FlushTunnelLog(WgnxEngine *engine) {
             static int32_t udp = 0;
-            static char out[sizeof g_tailnet_log];
-            if (!g_log_tailnet) return;
+            static char out[sizeof g_tunnel_log];
+            if (!g_log_tunnel) return;
             const WgnxCtlStatus st = status::Get();
-            if (st.state == WGNX_CTL_PAUSED || st.ipv4[0] == 0) return;
-            if (armTicksToNs(armGetSystemTick()) < g_tailnet_log_hold_until_ns) return;
+            if (st.state != WGNX_CTL_CONNECTED) return;
+            if (armTicksToNs(armGetSystemTick()) < g_tunnel_log_hold_until_ns) return;
             size_t len;
             {
                 std::scoped_lock lk(g_log_mutex);
-                if (g_tailnet_log_len == 0) return;
-                len = g_tailnet_log_len;
-                std::memcpy(out, g_tailnet_log, len);
-                g_tailnet_log_len = 0;
+                if (g_tunnel_log_len == 0) return;
+                len = g_tunnel_log_len;
+                std::memcpy(out, g_tunnel_log, len);
+                g_tunnel_log_len = 0;
             }
             if (udp <= 0) udp = wgnx_net_udp_bind(engine, 0);
             if (udp <= 0) return;
@@ -636,24 +632,12 @@ namespace ams {
             g_log_udp_fd = -1;
         }
 
-        void OpenUdpLogSocket() {
-            if (g_log_udp_addr.sin_family != AF_INET || g_log_tailnet) return;
-            const int fd = ::socket(AF_INET, SOCK_DGRAM, 0);
-            if (fd < 0) return;
-            // Send-only: keep its share of the socket buffer pool small.
-            const int rcv = 0x1000, snd = 0x2000;
-            ::setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &rcv, sizeof rcv);
-            ::setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &snd, sizeof snd);
-            std::scoped_lock lk(g_log_mutex);
-            g_log_udp_fd = fd;
-        }
-
         // Sends the lines logged so far over UDP, once the network is up (at
         // boot the log socket exists before Wi-Fi does); later lines go out
         // directly.
         void FlushEarlyLog() {
             std::scoped_lock lk(g_log_mutex);
-            if (g_early_log_done) return;  // includes the tailnet case (queued instead)
+            if (g_early_log_done) return;  // includes the tunnel case (queued instead)
             if (g_log_udp_fd < 0) {
                 g_early_log_len = 0;
                 g_early_log_done = true;
@@ -667,6 +651,132 @@ namespace ams {
     }
 
     namespace {
+
+        // ---- the tunnel's configuration ------------------------------------
+
+        constinit os::SdkMutex g_conf_mutex;
+        constinit char g_conf_name[WGNX_CTL_CONF_NAME_MAX] = {};
+        constinit bool g_hosts_on = true;
+        constinit std::atomic<bool> g_hosts_due = false;  // Collect() ran; Write() pending
+
+        // Loads config/wireguard-nx/<name> into the engine (directly at boot,
+        // through the runtime once it runs), tells the MITM and the hosts
+        // file, and records the outcome for the overlay. Returns WGNX_CTL_CONF_*.
+        u32 ApplyConf(const char *name, WgnxEngine *engine, ::wgnx::Runtime *rt) {
+            std::scoped_lock lk(g_conf_mutex);
+            if (!ValidConfName(name)) return WGNX_CTL_CONF_NOT_FOUND;
+            char path[128];
+            util::SNPrintf(path, sizeof path, "%s/%s", ConfigDir, name);
+            auto text = std::make_unique<char[]>(ConfMaxSize);
+            const s64 len = ReadWholeFile(path, text.get(), ConfMaxSize);
+            if (len < 0) {
+                Log("config: %s: not found (or over %zu KB)", path, ConfMaxSize / 1024);
+                status::SetConfError(name, "not found in config/wireguard-nx");
+                return WGNX_CTL_CONF_NOT_FOUND;
+            }
+            WgnxConfig wc = {};
+            wc.conf = text.get();
+            wc.conf_len = static_cast<size_t>(len);
+            static char err[160];
+            static WgnxPrefix routes[::wgnx::VSock::MaxRoutes];  // 64 * 24 bytes: static, not stack
+            size_t n_routes = 0;
+            u32 peers = 0;
+            auto load = [&](WgnxEngine *e) {
+                if (!wgnx_engine_reload(e, &wc, wgnx_driver_now_ns(), err, sizeof err)) return false;
+                n_routes = wgnx_engine_routes(e, routes, ::wgnx::VSock::MaxRoutes);
+                static WgnxPeerInfo info[WGNX_CTL_MAX_PEERS];
+                peers = static_cast<u32>(wgnx_engine_peers(e, info, WGNX_CTL_MAX_PEERS));
+                if (g_hosts_on) g_hosts_due = hosts::Collect(e) || g_hosts_due.load();
+                return true;
+            };
+            const bool ok = rt ? rt->With(load) : load(engine);
+            if (!ok) {
+                Log("config: %s: %s", name, err);
+                status::SetConfError(name, err);
+                return WGNX_CTL_CONF_INVALID;
+            }
+            ::wgnx::VSock::SetRoutes(routes, std::min(n_routes, ::wgnx::VSock::MaxRoutes));
+            util::SNPrintf(g_conf_name, sizeof g_conf_name, "%s", name);
+            status::SetConf(name, peers);
+            WgnxPrefix addr[1];
+            const bool have_addr = wgnx_engine_addresses(engine, addr, 1) > 0 && addr[0].family == 4;
+            u32 addr_be = 0;
+            if (have_addr) std::memcpy(&addr_be, addr[0].ip, 4);
+            Log("config: %s: %u peer(s), address %s, tunnel routes %zu%s", name, peers, have_addr ? inet_ntoa(in_addr{addr_be}) : "(none)",
+                n_routes, n_routes > ::wgnx::VSock::MaxRoutes ? " (only the first 64 are used)" : "");
+            StartUdpLog();
+            return WGNX_CTL_CONF_OK;
+        }
+
+        // Host names in Endpoint= lines: the engine asks (WGNX_EVENT_RESOLVE,
+        // with the runtime lock held, where a lookup must not block), the
+        // loop looks them up between rounds without the lock, and answers
+        // on its next round.
+        struct Resolve {
+            u32 peer;
+            u16 port;
+            char host[96];
+        };
+        constinit os::SdkMutex g_resolve_mutex;
+        constinit Resolve g_resolve_asked[8] = {};
+        constinit int g_resolve_asked_n = 0;
+        constinit Resolve g_resolve_done[8] = {};
+        constinit u32 g_resolve_done_ip[8] = {};
+        constinit int g_resolve_done_n = 0;
+        constinit u64 g_resolve_last_ns[WGNX_CTL_MAX_PEERS] = {};
+
+        void QueueResolve(const WgnxEvent &ev) {
+            std::scoped_lock lk(g_resolve_mutex);
+            for (int i = 0; i < g_resolve_asked_n; i++)
+                if (g_resolve_asked[i].peer == ev.value) return;
+            if (g_resolve_asked_n == static_cast<int>(util::size(g_resolve_asked))) return;
+            Resolve &r = g_resolve_asked[g_resolve_asked_n++];
+            r.peer = ev.value;
+            r.port = ev.port;
+            util::SNPrintf(r.host, sizeof r.host, "%s", ev.text);
+        }
+
+        // Without the runtime lock: one lookup per round (up to 3 s), at most
+        // every 10 s per peer.
+        void ResolveOne() {
+            Resolve r;
+            {
+                std::scoped_lock lk(g_resolve_mutex);
+                if (g_resolve_asked_n == 0) return;
+                r = g_resolve_asked[0];
+                std::memmove(g_resolve_asked, g_resolve_asked + 1, sizeof(Resolve) * (g_resolve_asked_n - 1));
+                g_resolve_asked_n--;
+            }
+            const u64 now = armTicksToNs(armGetSystemTick());
+            if (r.peer < WGNX_CTL_MAX_PEERS && g_resolve_last_ns[r.peer] && now - g_resolve_last_ns[r.peer] < 10'000'000'000ull) return;
+            if (r.peer < WGNX_CTL_MAX_PEERS) g_resolve_last_ns[r.peer] = now;
+            u32 ip = 0;
+            bool ok = false;
+            Timed("endpoint lookup", [&] { ok = ResolveViaDns(r.host, &ip) == 0; });
+            if (!ok) {
+                Log("endpoint: %s: lookup failed (errno %d)", r.host, errno);
+                return;
+            }
+            std::scoped_lock lk(g_resolve_mutex);
+            if (g_resolve_done_n == static_cast<int>(util::size(g_resolve_done))) return;
+            g_resolve_done_ip[g_resolve_done_n] = ip;
+            g_resolve_done[g_resolve_done_n++] = r;
+        }
+
+        // With the runtime lock: hand the answers to the engine.
+        void ApplyResolved(WgnxEngine *engine) {
+            std::scoped_lock lk(g_resolve_mutex);
+            for (int i = 0; i < g_resolve_done_n; i++) {
+                const Resolve &r = g_resolve_done[i];
+                WgnxAddr a = {};
+                a.family = 4;
+                std::memcpy(a.ip, &g_resolve_done_ip[i], 4);
+                a.port = r.port;
+                Log("endpoint: peer %u = %s -> %s:%u", r.peer, r.host, inet_ntoa(in_addr{g_resolve_done_ip[i]}), r.port);
+                wgnx_engine_set_peer_endpoint(engine, r.peer, &a, wgnx_driver_now_ns());
+            }
+            g_resolve_done_n = 0;
+        }
 
         // ---- sleep / wake ----------------------------------------------------
 
@@ -982,6 +1092,18 @@ namespace ams {
             __builtin_unreachable();
         }
 
+        constinit WgnxEngine *g_engine = nullptr;
+
+        // wgnx:ctl SetConf, on the ctl thread: switch to another .conf and
+        // make it the default for the next boot.
+        u32 SetConfForOverlay(const char *name) {
+            if (g_stopping || g_stop_failed || !g_runtime || !g_engine || status::IsStopping()) return WGNX_CTL_CONF_BUSY;
+            Log("config: switching to %s (from the overlay)", name);
+            const u32 rc = ApplyConf(name, g_engine, g_runtime);
+            if (rc == WGNX_CTL_CONF_OK) SetConfigValue("conf", name);
+            return rc;
+        }
+
     }
 
     void Main() {
@@ -1035,7 +1157,7 @@ namespace ams {
 
         Config cfg;
         LoadConfig(cfg);
-        if (cfg.log_udp[0]) SetUpUdpLog(cfg.log_udp);
+        if (cfg.log_udp[0]) SetUpUdpLog(cfg.log_udp);  // opened once the tunnel's routes are known
         wgnx_set_log_callback([](u32 level, const char *msg) { Log("%s%s", level <= 2 ? "WARN " : "", msg); }, 3);
         wgnx_set_resolver(ResolveViaDns);
 
@@ -1044,12 +1166,6 @@ namespace ams {
         wgnx_seed_rng(seed);
         if (const u32 st = wgnx_selftest(); st != WGNX_SELFTEST_OK) {
             Log("crypto selftest FAILED (%u); not starting", st);
-            return;
-        }
-
-        u8 machine[32], node[32], disco[32];
-        if (!LoadOrCreateKeys(machine, node, disco)) {
-            Log("cannot read/write %s", StatePath);
             return;
         }
 
@@ -1067,65 +1183,38 @@ namespace ams {
         u32 ip = CurrentIp();
         Log("network up, local address %s", inet_ntoa(in_addr{ip}));
         SetLocalNet(ip);
-        FlushEarlyLog();
 
-        // Only a dev setup (self-signed control/DERP) has one; the engine
-        // copies it, so it lives on the heap just until then.
-        std::unique_ptr<u8[]> ca;
-        s64 ca_len = -1;
-        if (cfg.ca_cert[0]) {
-            ca = std::make_unique<u8[]>(16_KB);
-            ca_len = ReadWholeFile(cfg.ca_cert, reinterpret_cast<char *>(ca.get()), 16_KB);
-            if (ca_len <= 0) Log("cannot read ca_cert %s", cfg.ca_cert);
-        }
-
+        // Consoles often have wrong clocks (dead RTC, Nintendo's NTP blocked):
+        // TLS needs a plausible date, and so does WireGuard (handshake
+        // timestamps must never go backwards, or peers ignore us).
         bool corrected = false;
         const u64 console_time = ConsoleUnixTime();
-        u64 unix_time = wgnx_sane_unix_time(console_time, cfg.control_url, &corrected);
-        if (corrected) Log("console clock implausible (%llu); using the control server's time (%llu)",
-                           static_cast<unsigned long long>(console_time), static_cast<unsigned long long>(unix_time));
+        u64 unix_time = wgnx_sane_unix_time(console_time, WGNX_UPDATE_HOST, &corrected);
+        if (corrected) Log("console clock implausible (%llu); using %s's time (%llu)",
+                           static_cast<unsigned long long>(console_time), WGNX_UPDATE_HOST, static_cast<unsigned long long>(unix_time));
         if (unix_time == 0) unix_time = console_time;
 
-        WgnxConfig ecfg = {};
-        ecfg.control_url = cfg.control_url;
-        ecfg.auth_key = cfg.auth_key[0] ? cfg.auth_key : nullptr;
-        ecfg.hostname = cfg.hostname;
-        ecfg.machine_key = machine;
-        ecfg.node_key = node;
-        ecfg.disco_key = disco;
-        ecfg.extra_root_der = ca_len > 0 ? ca.get() : nullptr;
-        ecfg.extra_root_len = ca_len > 0 ? static_cast<size_t>(ca_len) : 0;
-        WgnxEngine *engine = wgnx_engine_new(&ecfg, wgnx_driver_now_ns(), unix_time);
-        ca.reset();
-        if (!engine) {
-            Log("engine init failed (control_url %s)", cfg.control_url);
-            return;
+        WgnxEngine *engine = wgnx_engine_new(wgnx_driver_now_ns(), unix_time);
+        g_engine = engine;
+        g_hosts_on = std::strcmp(cfg.hosts, "off") != 0;
+        if (std::strcmp(cfg.tunnel_lan, "on") == 0) {
+            Log("tunnel_lan=on: LAN addresses go through the tunnel too (testing)");
+            ::wgnx::VSock::SetTunnelLan(true);
         }
-        // Peer names or addresses changed: refresh the hosts file (debounced
-        // in the loop below). Events arrive with the runtime lock held.
-        static u64 hosts_dirty_since = 0;
-        WgnxDriver *driver = wgnx_driver_new(engine, [](void *ctx, const WgnxEvent *ev) {
-            Log("%s: %s (%u)", EventName(ev->kind), ev->text, ev->value);
-            if (ev->kind == WGNX_EVENT_NODE_KEY) SaveNodeKey(static_cast<WgnxEngine *>(ctx));
+        char conf_name[WGNX_CTL_CONF_NAME_MAX];
+        SelectConf(cfg, conf_name, sizeof conf_name);
+        // A broken or missing .conf isn't fatal: the overlay shows why and
+        // offers the others.
+        ApplyConf(conf_name, engine, nullptr);
+        StartUdpLog();
+        FlushEarlyLog();
+        // Events arrive with the runtime lock held.
+        WgnxDriver *driver = wgnx_driver_new(engine, [](void *, const WgnxEvent *ev) {
+            if (ev->kind == WGNX_EVENT_RESOLVE) QueueResolve(*ev);
+            else Log("%s: %s (%u)", EventName(ev->kind), ev->text, ev->value);
             status::OnEvent(*ev);
-            if ((ev->kind == WGNX_EVENT_PEERS || ev->kind == WGNX_EVENT_ADDRESSES) && hosts_dirty_since == 0) {
-                hosts_dirty_since = armTicksToNs(armGetSystemTick());
-            }
-            if (ev->kind == WGNX_EVENT_PEERS) {
-                // Subnet routes for the MITM (64 * 18 bytes: static, not stack).
-                static WgnxPrefix routes[::wgnx::VSock::MaxRoutes];
-                const size_t n = wgnx_engine_routes(static_cast<WgnxEngine *>(ctx), routes, ::wgnx::VSock::MaxRoutes);
-                static size_t logged = SIZE_MAX;
-                if (n != logged) {
-                    logged = n;
-                    Log("subnet routes in use: %zu%s", n, n > ::wgnx::VSock::MaxRoutes ? " (only the first 64 are used)" : "");
-                }
-                ::wgnx::VSock::SetRoutes(routes, std::min(n, ::wgnx::VSock::MaxRoutes));
-            }
         }, engine);
-        const bool accept_routes = std::strcmp(cfg.accept_routes, "off") != 0;
-        wgnx_engine_set_accept_routes(engine, accept_routes);
-        const bool magicdns = std::strcmp(cfg.magicdns, "off") != 0;
+        wgnx_driver_resolve_inline(driver, 0);  // lookups happen off the lock (ResolveOne)
         if (cfg.overlay_budget_kb[0]) {
             // Bounded by the sysmodule's heap (heap_size.h): the engine and
             // the MITM need about 300 KB of it besides the overlay buffers.
@@ -1133,18 +1222,21 @@ namespace ams {
             wgnx_net_set_budget(engine, kb * 1024);
             Log("overlay buffer budget: %lu KB", kb);
         }
-        if (wgnx_driver_open_udp(driver, 41641) != 0 && wgnx_driver_open_udp(driver, 0) != 0) Log("no UDP socket: DERP only");
+        const u16 listen_port = wgnx_engine_listen_port(engine);
+        if (wgnx_driver_open_udp(driver, listen_port) != 0 && wgnx_driver_open_udp(driver, 0) != 0) {
+            Log("no UDP socket (errno %d); not starting", errno);
+            return;
+        }
+        Log("udp: port %u%s", wgnx_driver_udp_port(driver), listen_port && wgnx_driver_udp_port(driver) != listen_port ? " (ListenPort was taken)" : "");
         std::string error;
         auto rt = ::wgnx::Runtime::Adopt(engine, driver, &error);
         if (!rt) {
             Log("runtime: %s (errno %d)", error.c_str(), errno);
             return;
         }
-        Log("engine started: control %s, hostname %s", cfg.control_url, cfg.hostname);
-        // Before the loop and the MITM threads use the engine.
-        if (std::strcmp(cfg.taildrop, "off") != 0) taildrop::Start(driver);
+        Log("engine started");
 
-        // Homebrew sockets to tailnet addresses go through the engine.
+        // Homebrew sockets to tunnel addresses go through the engine.
         // The log socket goes down and up with the engine's own (sleep).
         // Coming back counts as having been offline (see the loop below).
         g_update_check = std::strcmp(cfg.update_check, "off") != 0;
@@ -1152,7 +1244,7 @@ namespace ams {
         // runtime lock (see Runtime::Run): the network check (nifm calls,
         // 3-7 ms), the hosts file (most of a second) and log lines written
         // to the SD card.
-        bool network_check_due = false, network_checked = false, hosts_due = false;
+        bool network_check_due = false, network_checked = false;
         u32 network_ip = 0;
         rt->SetSuspendHooks([] {
             {
@@ -1163,8 +1255,8 @@ namespace ams {
             SuspendUpdateCheck();
         }, [&ip, &network_checked] {
             network_checked = false;  // from before the sleep
-            g_tailnet_log_hold_until_ns = armTicksToNs(armGetSystemTick()) + 10'000'000'000ull;
-            OpenUdpLogSocket();
+            g_tunnel_log_hold_until_ns = armTicksToNs(armGetSystemTick()) + 10'000'000'000ull;
+            StartUdpLog();
             ip = 0;
             g_last_round_ns = 0;
             status::EngineRan(armTicksToNs(armGetSystemTick()));
@@ -1178,16 +1270,15 @@ namespace ams {
 
         // Status for the overlay (and the user's pause switch, applied before
         // the engine loop's first round), then its control service.
-        status::Initialize(*rt, (mitm ? WGNX_CTL_FLAG_MITM : 0) | (magicdns ? WGNX_CTL_FLAG_MAGICDNS : 0),
+        status::Initialize(*rt, (mitm ? WGNX_CTL_FLAG_MITM : 0) | (g_hosts_on ? WGNX_CTL_FLAG_HOSTS : 0),
                            std::strcmp(cfg.connect_notice, "off") != 0);
-        ctl::Start(StopForOverlay);
+        ctl::Start(StopForOverlay, SetConfForOverlay);
 
         // Engine loop on this thread; housekeeping between rounds. Re-detect
         // our address after Wi-Fi changes (roaming, sleep/wake): every 5 s,
         // or 250 ms while offline (a wake usually finds Wi-Fi still down).
-        // Back online, control and DERP retry at once rather than after the
-        // backoff their failures while offline grew, and the LAN endpoint is
-        // refreshed.
+        // Back online (or on a new address), every peer is contacted again at
+        // once and host names are resolved afresh.
         u64 last_check = armTicksToNs(armGetSystemTick());
         u64 last_heap_log = 0;
         const u64 started = armTicksToNs(armGetSystemTick());
@@ -1209,8 +1300,9 @@ namespace ams {
             }
             g_last_round_ns = now;
             status::EngineRan(now);
-            WgnxActivePeer active[WGNX_CTL_MAX_PEERS];
-            status::SetActivePeers(active, wgnx_engine_active_peers(engine, active, WGNX_CTL_MAX_PEERS));
+            static WgnxPeerInfo peers[WGNX_CTL_MAX_PEERS];  // 2.5 KB: static, not stack
+            status::SetPeers(peers, wgnx_engine_peers(engine, peers, WGNX_CTL_MAX_PEERS));
+            ApplyResolved(engine);
             // Whole-heap use (Rust, C++, C), sampled every round; the Rust
             // peak below is exact.
             const size_t heap_free = init::GetAllocator()->GetTotalFreeSize();
@@ -1241,12 +1333,8 @@ namespace ams {
                     Log("udp: one datagram per call (batched receive errno %d)", bsd_errno);
                 }
             }
-            FlushTailnetLog(engine);
+            FlushTunnelLog(engine);
             Timed("update check", [&] { StepUpdateCheck(now); });
-            if (magicdns && hosts_dirty_since != 0 && now - hosts_dirty_since > 3'000'000'000ull) {
-                hosts_dirty_since = 0;
-                hosts_due = hosts::Collect(engine);
-            }
             if (now - last_check > (ip ? 5'000'000'000ull : 250'000'000ull)) {
                 last_check = now;
                 network_check_due = true;
@@ -1257,10 +1345,9 @@ namespace ams {
                 status::SetOffline(cur == 0);
                 if (cur != ip) {
                     Log("local address changed: %s", cur ? inet_ntoa(in_addr{cur}) : "(offline)");
-                    if (cur && !ip) wgnx_engine_network_up(engine, wgnx_driver_now_ns());
                     ip = cur;
                     SetLocalNet(cur);
-                    if (cur) wgnx_driver_refresh_endpoints(d);
+                    if (cur) wgnx_engine_network_up(engine, wgnx_driver_now_ns());
                 }
             }
         }, [&] {
@@ -1269,10 +1356,8 @@ namespace ams {
                 Timed("network check", [&] { network_ip = NetworkUp() ? CurrentIp() : 0; });
                 network_checked = true;
             }
-            if (hosts_due) {
-                hosts_due = false;
-                Timed("hosts file update", [] { hosts::Write(); });
-            }
+            if (g_hosts_due.exchange(false)) Timed("hosts file update", [] { hosts::Write(); });
+            ResolveOne();
             std::scoped_lock lk(g_log_mutex);
             EmitDeferredLog();
         });

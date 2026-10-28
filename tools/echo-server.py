@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """TCP + UDP echo on one port (default 7), on all interfaces: the peer side of
-the vsock/MITM test suite when the Mac is the tailnet peer."""
+the vsock/MITM test suite when the Mac is the tunnel peer."""
 import socket, sys, threading
 
 port = int(sys.argv[1]) if len(sys.argv) > 1 else 7

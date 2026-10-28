@@ -1,6 +1,6 @@
 # Vendored subset of tailscale-rs (https://github.com/tailscale/tailscale-rs), ported to
-# `no_std + alloc` for tailscale-nx. See VENDORED.md for the upstream commit and the list of
-# modifications. This is a standalone workspace, excluded from the tsnx root workspace.
+# `no_std + alloc` for wireguard-nx (originally tailscale-nx). See VENDORED.md for the upstream commit and the list of
+# modifications. This is a standalone workspace, excluded from the wgnx root workspace.
 #
 # Every dependency below is declared with `default-features = false` so that nothing pulls in
 # `std`, `getrandom` or `libc` when building for `aarch64-nintendo-switch-freestanding`.
@@ -10,15 +10,9 @@
 [workspace]
 resolver = "3"
 members = [
-    "ts_capabilityversion",
-    "ts_control_serde",
-    "ts_disco_protocol",
     "ts_keys",
-    "ts_nodecapability",
     "ts_noise",
     "ts_packet",
-    "ts_packetfilter_serde",
-    "ts_peercapability",
     "ts_time",
     "ts_tunnel",
     "ts_util",
@@ -40,7 +34,6 @@ bytes = { version = "1", default-features = false }
 cfg-if = "1.0"
 chacha20poly1305 = { version = "0.10", default-features = false, features = ["alloc"] }
 chrono = { version = "0.4", default-features = false, features = ["alloc"] }
-crypto_box = { version = "0.9", default-features = false, features = ["alloc", "salsa20"] }
 hashbrown = { version = "0.17", default-features = false, features = ["default-hasher", "inline-more", "equivalent"] }
 heapless = { version = "0.9", default-features = false }
 hex = "0.4"
@@ -68,13 +61,9 @@ zerocopy = { version = "0.8", default-features = false, features = ["derive"] }
 zeroize = { version = "1.8.2", default-features = false, features = ["alloc", "zeroize_derive"] }
 
 # local workspace deps
-ts_capabilityversion = { path = "ts_capabilityversion", version = "0.6.1" }
 ts_keys = { path = "ts_keys", version = "0.6.1" }
-ts_nodecapability = { path = "ts_nodecapability", version = "0.6.1" }
 ts_noise = { path = "ts_noise", version = "0.6.1" }
 ts_packet = { path = "ts_packet", version = "0.6.1" }
-ts_packetfilter_serde = { path = "ts_packetfilter_serde", version = "0.6.1" }
-ts_peercapability = { path = "ts_peercapability", version = "0.6.1" }
 ts_time = { path = "ts_time", version = "0.6.1" }
 ts_util = { path = "ts_util", version = "0.6.1", default-features = false }
 

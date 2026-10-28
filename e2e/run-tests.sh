@@ -39,10 +39,10 @@ stop_bg() { docker rm -f "wgnx-e2e-$1" >/dev/null 2>&1; }
 if wgnx up --conf /state/client.conf --port 41641 --echo-test "$SERVER_IP" --expect-handshake >/tmp/wgnx-e2e-1.log 2>&1; then pass "echo + handshake"; else fail "echo + handshake (see /tmp/wgnx-e2e-1.log)"; fi
 
 # 2. Handshake retries: the server drops our packets for 20 s after we start.
-peer iptables -I INPUT -s 172.30.0.30 -p udp -j DROP
+peer iptables -I INPUT -s 172.31.0.30 -p udp -j DROP
 bg retry up --conf /state/roam.conf --port 41650
 sleep 20
-peer iptables -D INPUT -s 172.30.0.30 -p udp -j DROP
+peer iptables -D INPUT -s 172.31.0.30 -p udp -j DROP
 if wait_handshake roam 40; then pass "handshake retried after 20 s of loss"; else fail "handshake retried after 20 s of loss"; fi
 stop_bg retry
 
@@ -62,7 +62,7 @@ preload() {  # conf-name, command
   docker compose run --rm -T -e WGNX_CONF="/state/$1.conf" -e WGNX_PORT=41642 -e WGNX_WAIT_READY=1 \
     -e LD_PRELOAD=/src/target/linux/libwgnx_interpose.so --entrypoint sh wgnx -c "$2"
 }
-if preload preload "/src/target/linux/vsock-test $SERVER_IP 172.30.0.20:8080 10.7.0.3" >/tmp/wgnx-e2e-4.log 2>&1; then
+if preload preload "/src/target/linux/vsock-test $SERVER_IP 172.31.0.20:8080 10.7.0.3" >/tmp/wgnx-e2e-4.log 2>&1; then
   pass "socket virtualization suite (vsock-test)"
 else
   fail "socket virtualization suite (see /tmp/wgnx-e2e-4.log)"
@@ -97,14 +97,14 @@ if ! wgnx up --conf /state/badpsk.conf --port 41644 --expect-handshake --duratio
 # every 30 s while there is no handshake).
 bg dns up --conf /state/dns.conf --port 41645
 sleep 5
-docker exec wgnx-e2e-dns sh -c 'echo "172.30.0.20 wg-server-later" >> /etc/hosts'
+docker exec wgnx-e2e-dns sh -c 'echo "172.31.0.20 wg-server-later" >> /etc/hosts'
 if wait_handshake dns 60; then pass "host-name endpoint resolved later"; else fail "host-name endpoint resolved later"; fi
 stop_bg dns
 
 # 11. Roaming: the server follows us to a new port.
 wgnx up --conf /state/roam.conf --port 41650 --echo-test "$SERVER_IP" >/dev/null 2>&1
 if wgnx up --conf /state/roam.conf --port 41651 --echo-test "$SERVER_IP" >/dev/null 2>&1 \
-   && peer wg show wg0 endpoints | grep -q "$(key roam 3).*172.30.0.30:41651"; then pass "roaming to a new port"; else fail "roaming to a new port"; fi
+   && peer wg show wg0 endpoints | grep -q "$(key roam 3).*172.31.0.30:41651"; then pass "roaming to a new port"; else fail "roaming to a new port"; fi
 
 # 12. Several peers: echo reaches the second server too.
 if wgnx up --conf /state/client.conf --port 41646 --echo-test "$PEER2_IP" >/dev/null 2>&1; then pass "second peer"; else fail "second peer"; fi
@@ -115,8 +115,8 @@ if wait_handshake noep 20 && peer ping -c 3 -W 2 10.7.0.7 >/dev/null; then pass 
 stop_bg noep
 
 # 14. A broken conf: a clear error, and the shim stays out of the way.
-if wgnx check --conf /state/bad.conf 2>&1 | grep -q "line 2"; then pass "config error names the line"; else fail "config error names the line"; fi
-if preload bad "curl -s -m 10 http://172.30.0.20:8080/" 2>/dev/null | grep -q "<html"; then pass "shim disabled on a bad conf"; else fail "shim disabled on a bad conf"; fi
+if { wgnx check --conf /state/bad.conf 2>&1 || true; } | grep -q "line 2"; then pass "config error names the line"; else fail "config error names the line"; fi
+if preload bad "curl -s -m 10 http://172.31.0.20:8080/" 2>/dev/null | grep -q "<html"; then pass "shim disabled on a bad conf"; else fail "shim disabled on a bad conf"; fi
 
 # 15. Sleep and wake (the console's path): echo again within 3 s of resuming.
 if docker compose run --rm -T --entrypoint /src/target/linux/wgnx-c wgnx --conf /state/client.conf --port 41652 \

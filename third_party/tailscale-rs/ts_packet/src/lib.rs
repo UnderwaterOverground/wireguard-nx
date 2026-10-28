@@ -630,8 +630,8 @@ unsafe impl BufMut for PacketMut {
     }
 }
 
-impl crypto_box::aead::Buffer for PacketMut {
-    fn extend_from_slice(&mut self, other: &[u8]) -> crypto_box::aead::Result<()> {
+impl aead::Buffer for PacketMut {
+    fn extend_from_slice(&mut self, other: &[u8]) -> aead::Result<()> {
         self.contents.extend_from_slice(other);
         Ok(())
     }

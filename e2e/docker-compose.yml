@@ -7,7 +7,7 @@ networks:
   wgnx:
     ipam:
       config:
-        - subnet: 172.30.0.0/24
+        - subnet: 172.31.0.0/24
 
 services:
   # The server most tests talk to: wg 10.7.0.1, UDP 51820, with every
@@ -22,7 +22,7 @@ services:
     cap_add: [NET_ADMIN]
     networks:
       wgnx:
-        ipv4_address: 172.30.0.20
+        ipv4_address: 172.31.0.20
         aliases: [wg-server]
     profiles: [peer]
 
@@ -36,7 +36,7 @@ services:
     cap_add: [NET_ADMIN]
     networks:
       wgnx:
-        ipv4_address: 172.30.0.21
+        ipv4_address: 172.31.0.21
     depends_on: [peer]
     profiles: [peer]
 
@@ -84,7 +84,7 @@ services:
     cap_add: [NET_ADMIN]
     networks:
       wgnx:
-        ipv4_address: 172.30.0.30
+        ipv4_address: 172.31.0.30
     profiles: [wgnx]
 
 volumes:

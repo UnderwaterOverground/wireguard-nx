@@ -14,34 +14,28 @@ namespace ams::status {
     namespace {
 
         constexpr const char PausedPath[] = "sdmc:/config/wireguard-nx/paused";
-        constexpr const char LoginPath[] = "sdmc:/config/wireguard-nx/login.txt";
         // Ultrahand shows a toast for each .notify file here (and only if it
         // is installed: we never create the directory).
         constexpr const char NotifyDir[] = "sdmc:/config/ultrahand/notifications";
-        constexpr const char NotifyPath[] = "sdmc:/config/ultrahand/notifications/wireguard-nx-login.notify";
         constexpr const char ConnectedNotifyPath[] = "sdmc:/config/ultrahand/notifications/wireguard-nx-connected.notify";
         constexpr const char UpdateNotifyPath[] = "sdmc:/config/ultrahand/notifications/wireguard-nx-update.notify";
         constexpr const char MemoryNotifyPath[] = "sdmc:/config/ultrahand/notifications/wireguard-nx-memory.notify";
+        constexpr const char ConfigNotifyPath[] = "sdmc:/config/ultrahand/notifications/wireguard-nx-config.notify";
         // The overlay's "Connection notice" switch: present = off.
         constexpr const char NoNoticePath[] = "sdmc:/config/wireguard-nx/no-connect-notice";
-        constexpr const char UltrahandConfig[] = "sdmc:/config/ultrahand/config.ini";
 
         constinit os::SdkMutex g_mutex;
         constinit ::wgnx::Runtime *g_runtime = nullptr;
         constinit WgnxCtlStatus g_status = {};
-        constinit bool g_authorized = false;
-        constinit char g_login_url[256] = {};
         constinit char g_last_error[192] = {};
-        constinit WgnxCtlPeer g_peers[WGNX_CTL_MAX_PEERS] = {};
+        constinit char g_conf_name[WGNX_CTL_CONF_NAME_MAX] = {};
+        constinit WgnxPeerInfo g_peers[WGNX_CTL_MAX_PEERS] = {};
         constinit size_t g_peer_count = 0;  // in g_peers
-        constinit size_t g_peer_total = 0;  // active, including any that didn't fit
+        constinit size_t g_peer_total = 0;  // configured, including any that didn't fit
+        constinit bool g_handshaken = false;  // a handshake since the conf was applied
         constinit std::atomic<bool> g_paused = false;
         constinit bool g_connect_notice = true;   // config.ini connect_notice
         constinit bool g_announced_connected = false;  // once per boot
-        // When the control server's map stream went away, 0 while it's up:
-        // "Connected" turns into "Reconnecting" after ReconnectingAfterNs.
-        constinit u64 g_control_lost_ns = 0;
-        constexpr u64 ReconnectingAfterNs = 10'000'000'000ull;
         constinit std::atomic<u64> g_engine_ran_ns = 0;
         // What the engine loop is doing outside the engine itself (nullptr:
         // the engine), and whether its current stall has been logged.
@@ -64,65 +58,11 @@ namespace ams::status {
             fs::CloseFile(f);
         }
 
-        // Ultrahand's overlay-menu combo ("L+DDOWN+RS") in words.
-        void MenuCombo(char *out, size_t cap) {
-            util::SNPrintf(out, cap, "L+Down+R3");
-            char buf[2_KB] = {};
-            fs::FileHandle f;
-            if (R_FAILED(fs::OpenFile(std::addressof(f), UltrahandConfig, fs::OpenMode_Read))) return;
-            size_t got = 0;
-            static_cast<void>(fs::ReadFile(std::addressof(got), f, 0, buf, sizeof buf - 1));
-            fs::CloseFile(f);
-            const char *p = std::strstr(buf, "\nkey_combo=");
-            if (!p) return;
-            p += 11;
-            size_t n = 0;
-            for (const char *tok = p; *tok && *tok != '\r' && *tok != '\n';) {
-                const char *end = tok;
-                while (*end && *end != '+' && *end != '\r' && *end != '\n') end++;
-                const size_t len = static_cast<size_t>(end - tok);
-                struct { const char *key, *word; } names[] = {
-                    {"DDOWN", "Down"}, {"DUP", "Up"}, {"DLEFT", "Left"}, {"DRIGHT", "Right"}, {"RS", "R3"}, {"LS", "L3"},
-                };
-                const char *word = nullptr;
-                for (const auto &nm : names) {
-                    if (std::strlen(nm.key) == len && std::strncmp(tok, nm.key, len) == 0) word = nm.word;
-                }
-                n += util::SNPrintf(out + n, cap - n, "%s%.*s", n ? "+" : "", static_cast<int>(word ? std::strlen(word) : len), word ? word : tok);
-                if (n >= cap || *end != '+') break;
-                tok = end + 1;
-            }
-        }
-
-        // A login link appeared: tell the user without them opening anything.
-        void AnnounceLogin(const char *url) {
-            char line[300];
-            const int n = util::SNPrintf(line, sizeof line, "%s\n", url);
-            WriteFile(LoginPath, line, static_cast<size_t>(n));
-            if (!Exists(NotifyDir, fs::DirectoryEntryType_Directory)) return;
-            char combo[64];
-            MenuCombo(combo, sizeof combo);
-            // Ultrahand cuts a toast at ~140 characters (font 18): keep it to
-            // the link and the overlay combo; the scheme can be typed.
-            const char *shown = std::strncmp(url, "https://", 8) == 0 ? url + 8 : url;
-            static char json[512];
-            const int m = util::SNPrintf(json, sizeof json,
-                                         "{\n"
-                                         "    \"title\": \"Tailscale: log in needed\",\n"
-                                         "    \"text\": \"Open %s or %s > Tailscale for a QR code. Unwanted? Turn off wireguard-nx in Sysmodules.\",\n"
-                                         "    \"font_size\": 18,\n"
-                                         "    \"duration\": 0,\n"  // 0: stays until dismissed
-                                         "    \"priority\": 20\n"
-                                         "}\n",
-                                         shown, combo);
-            WriteFile(NotifyPath, json, static_cast<size_t>(m));
-        }
-
         // A short toast, if Ultrahand is installed. `text` is JSON string
         // content already.
         void Toast(const char *path, const char *title, const char *text, u32 duration_ms) {
             if (!Exists(NotifyDir, fs::DirectoryEntryType_Directory)) return;
-            static char json[256];
+            static char json[400];
             const int n = util::SNPrintf(json, sizeof json,
                                          "{\n"
                                          "    \"title\": \"%s\",\n"
@@ -136,43 +76,18 @@ namespace ams::status {
         }
 
         // First connection since boot: a short toast with our address. Not on
-        // later reconnects (every wake would show it).
+        // later reconnects (every wake would show it). g_mutex held.
         void AnnounceConnected() {
             if (g_announced_connected || g_status.state != WGNX_CTL_CONNECTED) return;
             g_announced_connected = true;
             if (!g_connect_notice || Exists(NoNoticePath, fs::DirectoryEntryType_File)) return;
             char text[48];
             util::SNPrintf(text, sizeof text, "Connected. IP: %u.%u.%u.%u", g_status.ipv4[0], g_status.ipv4[1], g_status.ipv4[2], g_status.ipv4[3]);
-            Toast(ConnectedNotifyPath, "Tailscale", text, 5000);
+            Toast(ConnectedNotifyPath, "WireGuard", text, 5000);
         }
 
-        // `src` as JSON string content, at most `max` bytes of it (cut at a
-        // character boundary, with "..."): quotes and backslashes escaped,
-        // control characters dropped, UTF-8 kept.
-        void JsonText(char *dst, size_t cap, const char *src, size_t max) {
-            size_t n = 0, taken = 0;
-            for (const char *p = src; *p && n + 8 < cap; p++) {
-                const unsigned char c = static_cast<unsigned char>(*p);
-                // Cut only before the first byte of a character.
-                if (taken >= max && (c & 0xC0) != 0x80) {
-                    dst[n++] = '.', dst[n++] = '.', dst[n++] = '.';
-                    break;
-                }
-                taken++;
-                if (c < 0x20 || c == 0x7f) continue;
-                if (c == '"' || c == '\\') dst[n++] = '\\';
-                dst[n++] = static_cast<char>(c);
-            }
-            dst[n] = 0;
-        }
-
-        void ClearLogin() {
-            static_cast<void>(fs::DeleteFile(LoginPath));
-            static_cast<void>(fs::DeleteFile(NotifyPath));
-        }
-
-        // Login URLs and errors go into JSON and the overlay: keep them to
-        // plain printable ASCII without quotes or backslashes.
+        // Errors go into JSON and the overlay: keep them to plain printable
+        // ASCII without quotes or backslashes.
         void CopySafe(char *dst, size_t cap, const char *src) {
             size_t n = 0;
             for (; *src && n + 1 < cap; src++) {
@@ -182,6 +97,11 @@ namespace ams::status {
             dst[n] = 0;
         }
 
+        // The state while the tunnel is meant to be running (g_mutex held).
+        u32 RunningState() {
+            return g_handshaken ? WGNX_CTL_CONNECTED : WGNX_CTL_CONNECTING;
+        }
+
     }
 
     void Initialize(::wgnx::Runtime &rt, u32 flags, bool connect_notice) {
@@ -189,35 +109,46 @@ namespace ams::status {
         g_runtime = std::addressof(rt);
         g_connect_notice = connect_notice;
         g_status.version = WGNX_CTL_VERSION;
-        g_status.flags = flags;
-        // A stale prompt from an earlier run: the engine reissues it if needed.
-        ClearLogin();
+        g_status.flags |= flags;
         if (Exists(PausedPath, fs::DirectoryEntryType_File)) {
             g_paused = true;
             g_status.state = WGNX_CTL_PAUSED;
             rt.StartSuspended(::wgnx::Runtime::kPaused);
             Log("status: paused (delete %s or use the overlay to resume)", PausedPath);
+        } else if (g_status.state == WGNX_CTL_STARTING && !(g_status.flags & WGNX_CTL_FLAG_CONF_ERROR)) {
+            g_status.state = RunningState();
         }
+    }
+
+    void SetConf(const char *name, u32 peers) {
+        std::scoped_lock lk(g_mutex);
+        util::SNPrintf(g_conf_name, sizeof g_conf_name, "%s", name);
+        g_status.peers = peers;
+        g_status.peers_up = 0;
+        g_status.flags &= ~static_cast<u32>(WGNX_CTL_FLAG_CONF_ERROR);
+        g_last_error[0] = 0;
+        g_handshaken = false;
+        g_peer_count = g_peer_total = 0;
+        if (g_runtime && !g_paused && g_status.state != WGNX_CTL_STOPPING) g_status.state = WGNX_CTL_CONNECTING;
+    }
+
+    void SetConfError(const char *name, const char *error) {
+        {
+            std::scoped_lock lk(g_mutex);
+            g_status.flags |= WGNX_CTL_FLAG_CONF_ERROR;
+            char msg[192];
+            util::SNPrintf(msg, sizeof msg, "%s: %s", name, error);
+            CopySafe(g_last_error, sizeof g_last_error, msg);
+            // What was running before (if anything) keeps running.
+        }
+        char text[220];
+        util::SNPrintf(text, sizeof text, "%s", g_last_error);
+        Toast(ConfigNotifyPath, "WireGuard: config error", text, 10000);
     }
 
     void OnEvent(const WgnxEvent &ev) {
         std::scoped_lock lk(g_mutex);
         switch (ev.kind) {
-            case WGNX_EVENT_LOGIN_URL:
-                g_authorized = false;
-                CopySafe(g_login_url, sizeof g_login_url, ev.text);
-                if (!g_paused) g_status.state = WGNX_CTL_NEEDS_LOGIN;
-                AnnounceLogin(g_login_url);
-                break;
-            case WGNX_EVENT_AUTHORIZED:
-                if (g_login_url[0]) ClearLogin();
-                g_login_url[0] = 0;
-                g_authorized = true;
-                // Re-authorizing (after a resume or wake) doesn't re-announce
-                // unchanged addresses: a known address means we're back.
-                if (!g_paused) g_status.state = g_status.ipv4[0] ? WGNX_CTL_CONNECTED : WGNX_CTL_CONNECTING;
-                AnnounceConnected();
-                break;
             case WGNX_EVENT_ADDRESSES: {
                 u32 a = 0, b = 0, c = 0, d = 0;
                 const char *p = ev.text;
@@ -228,20 +159,13 @@ namespace ams::status {
                 };
                 if (num(&a) && *p++ == '.' && num(&b) && *p++ == '.' && num(&c) && *p++ == '.' && num(&d)) {
                     g_status.ipv4[0] = a, g_status.ipv4[1] = b, g_status.ipv4[2] = c, g_status.ipv4[3] = d;
+                } else {
+                    std::memset(g_status.ipv4, 0, sizeof g_status.ipv4);
                 }
-                if (g_authorized && !g_paused) g_status.state = WGNX_CTL_CONNECTED;
-                AnnounceConnected();
                 break;
             }
             case WGNX_EVENT_PEERS:
                 g_status.peers = ev.value;
-                break;
-            case WGNX_EVENT_HOME_DERP:
-                g_status.home_derp = ev.value;
-                break;
-            case WGNX_EVENT_CONTROL:
-                if (ev.value) g_control_lost_ns = 0;
-                else if (g_control_lost_ns == 0) g_control_lost_ns = NowNs();
                 break;
             case WGNX_EVENT_ERROR:
                 CopySafe(g_last_error, sizeof g_last_error, ev.text);
@@ -251,62 +175,49 @@ namespace ams::status {
         }
     }
 
-    void AnnounceFile(bool saved, const char *name, u64 bytes, const char *from, const char *why) {
-        if (!Exists(NotifyDir, fs::DirectoryEntryType_Directory)) return;
-        char n[96], f[48], w[200], size[24];
-        JsonText(n, sizeof n, name, 48);
-        JsonText(f, sizeof f, from, 24);
-        JsonText(w, sizeof w, why, 120);
-        if (bytes >= 1'000'000) {
-            util::SNPrintf(size, sizeof size, "%lu.%lu MB", static_cast<unsigned long>(bytes / 1'000'000), static_cast<unsigned long>(bytes / 100'000 % 10));
-        } else {
-            util::SNPrintf(size, sizeof size, "%lu KB", static_cast<unsigned long>((bytes + 999) / 1000));
+    void SetPeers(const WgnxPeerInfo *peers, size_t n) {
+        std::scoped_lock lk(g_mutex);
+        g_peer_total = n;
+        g_peer_count = std::min(n, static_cast<size_t>(WGNX_CTL_MAX_PEERS));
+        u32 up = 0;
+        for (size_t i = 0; i < g_peer_count; i++) {
+            g_peers[i] = peers[i];
+            g_peers[i].name[sizeof g_peers[i].name - 1] = 0;
+            if (peers[i].flags & WGNX_PEER_SESSION) up++;
         }
-        static char json[512];
-        const int len = saved ? util::SNPrintf(json, sizeof json,
-                                               "{\n    \"title\": \"Taildrop\",\n    \"text\": \"Received %s (%s) from %s. It's in the Taildrop folder.\",\n"
-                                               "    \"font_size\": 18,\n    \"duration\": 6000,\n    \"priority\": 10\n}\n",
-                                               n, size, f)
-                              : util::SNPrintf(json, sizeof json,
-                                               "{\n    \"title\": \"Taildrop\",\n    \"text\": \"Couldn't receive %s from %s: %s.\",\n"
-                                               "    \"font_size\": 18,\n    \"duration\": 8000,\n    \"priority\": 10\n}\n",
-                                               n, f, w);
-        // Several files in a row: a file each, so none replaces another
-        // before Ultrahand shows it.
-        static u32 seq = 0;
-        char path[96];
-        util::SNPrintf(path, sizeof path, "%s/wireguard-nx-taildrop-%u.notify", NotifyDir, static_cast<unsigned>(seq++ % 8));
-        WriteFile(path, json, static_cast<size_t>(len));
+        g_status.peers_up = up;
+        if (up > 0 && !g_handshaken) {
+            g_handshaken = true;
+            if (!g_paused && g_status.state != WGNX_CTL_STOPPING) {
+                g_status.state = WGNX_CTL_CONNECTED;
+                AnnounceConnected();
+            }
+        }
     }
 
     void AnnounceUpdate(const char *latest) {
         char text[96];
         util::SNPrintf(text, sizeof text, "wireguard-nx %s is out (you have %s).", latest, wgnx_version());
-        Toast(UpdateNotifyPath, "Tailscale: update available", text, 10000);
+        Toast(UpdateNotifyPath, "WireGuard: update available", text, 10000);
     }
 
     void AnnounceLowMemory(u32 free_kb) {
         char text[128];
         util::SNPrintf(text, sizeof text, "Only %u KB was free after boot. If the Switch crashes (2001-0132), turn off a sysmodule.",
                        static_cast<unsigned>(free_kb));
-        Toast(MemoryNotifyPath, "Tailscale: low system memory", text, 10000);
+        Toast(MemoryNotifyPath, "WireGuard: low system memory", text, 10000);
     }
 
     WgnxCtlStatus Get() {
         WgnxCtlStatus s;
-        u64 control_lost_ns;
         {
             std::scoped_lock lk(g_mutex);
             s = g_status;
-            control_lost_ns = g_control_lost_ns;
         }
         s.memory_kb = static_cast<u32>(memory::Own() / 1024);
         u64 free_bytes = 0, total = 0;
         if (memory::SystemPool(&free_bytes, &total)) s.system_free_kb = static_cast<u32>(free_bytes / 1024);
         const u64 now = NowNs();
-        if (s.state == WGNX_CTL_CONNECTED && control_lost_ns && now - control_lost_ns > ReconnectingAfterNs) {
-            s.state = WGNX_CTL_CONNECTING;
-        }
         const u64 ran = g_engine_ran_ns;
         const u64 idle_s = ran && now > ran ? (now - ran) / 1'000'000'000ull : 0;
         // Suspended (the console dozing or asleep, or paused) isn't stuck:
@@ -339,12 +250,7 @@ namespace ams::status {
     void SetOffline(bool offline) {
         std::scoped_lock lk(g_mutex);
         if (offline) g_status.flags |= WGNX_CTL_FLAG_OFFLINE;
-        else g_status.flags &= ~WGNX_CTL_FLAG_OFFLINE;
-    }
-
-    size_t GetLoginUrl(char *out, size_t cap) {
-        std::scoped_lock lk(g_mutex);
-        return static_cast<size_t>(util::SNPrintf(out, cap, "%s", g_status.state == WGNX_CTL_NEEDS_LOGIN ? g_login_url : ""));
+        else g_status.flags &= ~static_cast<u32>(WGNX_CTL_FLAG_OFFLINE);
     }
 
     size_t GetLastError(char *out, size_t cap) {
@@ -352,26 +258,12 @@ namespace ams::status {
         return static_cast<size_t>(util::SNPrintf(out, cap, "%s", g_last_error));
     }
 
-    void SetActivePeers(const WgnxActivePeer *peers, size_t n) {
+    size_t GetConfName(char *out, size_t cap) {
         std::scoped_lock lk(g_mutex);
-        g_peer_total = n;
-        g_peer_count = std::min(n, static_cast<size_t>(WGNX_CTL_MAX_PEERS));
-        bool direct = false;
-        for (size_t i = 0; i < g_peer_count; i++) {
-            WgnxCtlPeer &p = g_peers[i];
-            p = {};
-            std::memcpy(p.name, peers[i].name, sizeof p.name);
-            p.name[sizeof p.name - 1] = 0;
-            p.direct = peers[i].direct;
-            p.latency_ms = peers[i].latency_ms;
-            p.relay_region = peers[i].relay_region;
-            direct |= p.direct != 0;
-        }
-        if (direct) g_status.flags |= WGNX_CTL_FLAG_DIRECT;
-        else g_status.flags &= ~static_cast<u32>(WGNX_CTL_FLAG_DIRECT);
+        return static_cast<size_t>(util::SNPrintf(out, cap, "%s", g_conf_name));
     }
 
-    size_t GetActivePeers(WgnxCtlPeer *out, size_t max) {
+    size_t GetPeers(WgnxPeerInfo *out, size_t max) {
         std::scoped_lock lk(g_mutex);
         std::memcpy(out, g_peers, std::min(g_peer_count, max) * sizeof *out);
         return g_peer_total;
@@ -386,11 +278,14 @@ namespace ams::status {
         return g_status.state == WGNX_CTL_CONNECTED;
     }
 
+    bool IsStopping() {
+        std::scoped_lock lk(g_mutex);
+        return g_status.state == WGNX_CTL_STOPPING;
+    }
+
     void SetStopping() {
         std::scoped_lock lk(g_mutex);
         g_status.state = WGNX_CTL_STOPPING;
-        g_login_url[0] = 0;
-        ClearLogin();
     }
 
     void SetPaused(bool paused) {
@@ -404,18 +299,18 @@ namespace ams::status {
                 g_status.state = WGNX_CTL_PAUSED;
                 WriteFile(PausedPath, "1", 1);
             } else {
-                g_status.state = g_login_url[0] ? WGNX_CTL_NEEDS_LOGIN : WGNX_CTL_STARTING;  // until re-authorized
+                g_status.state = RunningState();
                 static_cast<void>(fs::DeleteFile(PausedPath));
                 // The loop didn't run while paused: that isn't a stall.
                 g_engine_ran_ns = NowNs();
             }
         }
         // Without waiting for the engine loop: wgnx:ctl must always answer,
-        // even while the loop is busy or stuck. Homebrew's tailnet sockets
+        // even while the loop is busy or stuck. Homebrew's tunnel sockets
         // fail at once anyway (bsd_mitm checks IsPaused), and the loop
         // closes or reopens the engine's own within a second.
         rt->RequestSuspended(::wgnx::Runtime::kPaused, paused);
-        Log("status: Tailscale %s", paused ? "paused" : "resumed");
+        Log("status: WireGuard %s", paused ? "paused" : "resumed");
     }
 
 }

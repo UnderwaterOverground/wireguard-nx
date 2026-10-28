@@ -9,7 +9,7 @@
 #   bg       10.7.0.4  PersistentKeepalive 3
 #   psk      10.7.0.5  with a PresharedKey (badpsk: the same with a wrong one)
 #   roam     10.7.0.6
-#   noep     10.7.0.7  no Endpoint: the server contacts it (172.30.0.30:41649)
+#   noep     10.7.0.7  no Endpoint: the server contacts it (172.31.0.30:41649)
 #   dns      10.7.0.8  Endpoint by name (wg-server-later, see run-tests.sh)
 set -euo pipefail
 cd "$(dirname "$0")"
@@ -17,14 +17,16 @@ mkdir -p state
 docker compose --profile peer build -q peer
 
 if [[ ! -s state/keys.txt ]]; then
-  docker compose run --rm --no-deps --entrypoint sh peer -c '
+  # Plain docker run: the compose service's mounts would create the .conf
+  # paths as directories before they exist.
+  docker run --rm --entrypoint sh wgnx-e2e-peer -c '
     for n in server peer2 client preload bg psk roam noep dns; do
       k=$(wg genkey); echo "$n $k $(echo "$k" | wg pubkey) $(wg genpsk)"
     done' > state/keys.txt
 fi
 key() { awk -v n="$1" -v f="$2" '$1==n {print $f}' state/keys.txt; }  # f: 2 private, 3 public, 4 psk
-SERVER=172.30.0.20
-PEER2=172.30.0.21
+SERVER=172.31.0.20
+PEER2=172.31.0.21
 
 client() {  # name address peers...
   local name=$1 addr=$2; shift 2
@@ -65,7 +67,7 @@ printf '[Interface]\nPrivateKey = not-a-key\nAddress = 10.7.0.99/24\n' > state/b
   server_peer bg 10.7.0.4/32
   server_peer psk 10.7.0.5/32 "PresharedKey = $(key psk 4)"
   server_peer roam 10.7.0.6/32
-  server_peer noep 10.7.0.7/32 "Endpoint = 172.30.0.30:41649" "PersistentKeepalive = 5"
+  server_peer noep 10.7.0.7/32 "Endpoint = 172.31.0.30:41649" "PersistentKeepalive = 5"
   server_peer dns 10.7.0.8/32
 } > state/wg0.conf
 {

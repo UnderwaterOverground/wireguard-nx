@@ -29,13 +29,6 @@ macro_rules! create_x25519_public_key_type {
                 Self($crate::util::random_x25519_public())
             }
 
-            /// Convert the key to a `crypto_box` [`::crypto_box::PublicKey`], to perform cryptographic operations.
-            ///
-            /// The `crypto_box` type does not preserve the key's Tailscale purpose. You should convert
-            /// keys to the `crypto_box` type as close as possible to the cryptographic operations.
-            pub fn to_crypto_box(&self) -> ::crypto_box::PublicKey {
-                self.0.into()
-            }
 
             /// Convert the key to an `x25519_dalek` [`::x25519_dalek::PublicKey`], to perform cryptographic operations.
             ///
@@ -142,13 +135,6 @@ macro_rules! create_x25519_private_key_type {
                 $public_name(public.to_bytes())
             }
 
-            /// Convert the key to a `crypto_box` [`::crypto_box::SecretKey`], to perform cryptographic operations.
-            ///
-            /// The `crypto_box` type does not preserve the key's Tailscale purpose. You should convert
-            /// keys to the `crypto_box` type as close as possible to the cryptographic operations.
-            pub fn to_crypto_box(&self) -> ::crypto_box::SecretKey {
-                self.0.into()
-            }
 
             /// Convert the key to an `x25519_dalek` [`::x25519_dalek::StaticSecret`], to perform cryptographic operations.
             ///

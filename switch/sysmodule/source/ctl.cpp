@@ -8,11 +8,12 @@
 
 #define WGNX_CTL_INTERFACE_INFO(C, H)                                                                                                    \
     AMS_SF_METHOD_INFO(C, H, 0, Result, GetStatus,    (sf::Out<::WgnxCtlStatus> out),                       (out))                   \
-    AMS_SF_METHOD_INFO(C, H, 1, Result, GetLoginUrl,  (const sf::OutBuffer &url, sf::Out<u32> out_len),       (url, out_len))          \
-    AMS_SF_METHOD_INFO(C, H, 2, Result, SetPaused,    (bool paused),                                          (paused))                \
-    AMS_SF_METHOD_INFO(C, H, 3, Result, GetLastError, (const sf::OutBuffer &msg, sf::Out<u32> out_len),       (msg, out_len))          \
-    AMS_SF_METHOD_INFO(C, H, 4, Result, Stop,         (sf::Out<u32> out_code, sf::Out<u32> out_detail),       (out_code, out_detail))  \
-    AMS_SF_METHOD_INFO(C, H, 5, Result, GetActivePeers, (const sf::OutBuffer &peers, sf::Out<u32> out_count),   (peers, out_count))
+    AMS_SF_METHOD_INFO(C, H, 1, Result, SetPaused,    (bool paused),                                          (paused))                \
+    AMS_SF_METHOD_INFO(C, H, 2, Result, GetLastError, (const sf::OutBuffer &msg, sf::Out<u32> out_len),       (msg, out_len))          \
+    AMS_SF_METHOD_INFO(C, H, 3, Result, Stop,         (sf::Out<u32> out_code, sf::Out<u32> out_detail),       (out_code, out_detail))  \
+    AMS_SF_METHOD_INFO(C, H, 4, Result, GetPeers,     (const sf::OutBuffer &peers, sf::Out<u32> out_count),   (peers, out_count))      \
+    AMS_SF_METHOD_INFO(C, H, 5, Result, GetConfName,  (const sf::OutBuffer &name, sf::Out<u32> out_len),      (name, out_len))         \
+    AMS_SF_METHOD_INFO(C, H, 6, Result, SetConf,      (const sf::InBuffer &name, sf::Out<u32> out_code),      (name, out_code))
 
 AMS_SF_DEFINE_INTERFACE(ams::ctl, ICtl, WGNX_CTL_INTERFACE_INFO, 0x7767636C)
 
@@ -21,6 +22,7 @@ namespace ams::ctl {
     namespace {
 
         constinit StopHandler g_stop = nullptr;
+        constinit ConfHandler g_conf = nullptr;
 
     }
 
@@ -28,12 +30,6 @@ namespace ams::ctl {
         public:
             Result GetStatus(sf::Out<::WgnxCtlStatus> out) {
                 out.SetValue(status::Get());
-                R_SUCCEED();
-            }
-
-            Result GetLoginUrl(const sf::OutBuffer &url, sf::Out<u32> out_len) {
-                const size_t n = status::GetLoginUrl(reinterpret_cast<char *>(url.GetPointer()), url.GetSize());
-                out_len.SetValue(static_cast<u32>(n));
                 R_SUCCEED();
             }
 
@@ -55,9 +51,25 @@ namespace ams::ctl {
                 R_SUCCEED();
             }
 
-            Result GetActivePeers(const sf::OutBuffer &peers, sf::Out<u32> out_count) {
-                const size_t n = status::GetActivePeers(reinterpret_cast<::WgnxCtlPeer *>(peers.GetPointer()), peers.GetSize() / sizeof(::WgnxCtlPeer));
+            Result GetPeers(const sf::OutBuffer &peers, sf::Out<u32> out_count) {
+                const size_t n = status::GetPeers(reinterpret_cast<::WgnxPeerInfo *>(peers.GetPointer()), peers.GetSize() / sizeof(::WgnxPeerInfo));
                 out_count.SetValue(static_cast<u32>(n));
+                R_SUCCEED();
+            }
+
+            Result GetConfName(const sf::OutBuffer &name, sf::Out<u32> out_len) {
+                const size_t n = status::GetConfName(reinterpret_cast<char *>(name.GetPointer()), name.GetSize());
+                out_len.SetValue(static_cast<u32>(n));
+                R_SUCCEED();
+            }
+
+            Result SetConf(const sf::InBuffer &name, sf::Out<u32> out_code) {
+                char buf[WGNX_CTL_CONF_NAME_MAX];
+                const size_t n = std::min(name.GetSize(), sizeof buf - 1);
+                std::memcpy(buf, name.GetPointer(), n);
+                buf[n] = 0;
+                buf[std::strcspn(buf, "\r\n")] = 0;
+                out_code.SetValue(g_conf ? g_conf(buf) : static_cast<u32>(WGNX_CTL_CONF_BUSY));
                 R_SUCCEED();
             }
     };
@@ -72,8 +84,8 @@ namespace ams::ctl {
         constinit sf::UnmanagedServiceObject<ICtl, CtlService> g_ctl_object;
 
         // SetPaused and Stop wait (a few seconds at most) for the engine loop
-        // and other threads; nothing deep.
-        alignas(os::ThreadStackAlignment) constinit u8 g_thread_stack[0x2000];
+        // and other threads; SetConf parses a .conf in the engine.
+        alignas(os::ThreadStackAlignment) constinit u8 g_thread_stack[0x4000];
         constinit os::ThreadType g_thread;
 
         void ServerThread(void *) {
@@ -82,8 +94,9 @@ namespace ams::ctl {
 
     }
 
-    bool Start(StopHandler stop) {
+    bool Start(StopHandler stop, ConfHandler conf) {
         g_stop = stop;
+        g_conf = conf;
         // Started from the overlay right after a stop, sm may not yet have
         // dropped the old process's registration: retry for a moment.
         Result rc = ResultSuccess();

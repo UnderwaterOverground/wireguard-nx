@@ -1,4 +1,4 @@
-// Tailscale overlay: status, pause, stop/start and login (QR code) for the
+// WireGuard overlay: status, peers, pause, config and stop/start for the
 // wireguard-nx sysmodule, through its wgnx:ctl service (native/ctl/wgnx_ctl.h).
 #define TESLA_INIT_IMPL
 #include <tesla.hpp>
@@ -10,9 +10,6 @@
 #include <cstdio>
 #include <cstring>
 
-extern "C" {
-#include "qrcodegen.h"
-}
 #include "wgnx_ctl.h"
 
 namespace {
@@ -41,10 +38,10 @@ namespace {
             bool have = false;   // a session is open
             bool status_ok = false;
             WgnxCtlStatus status = {};
-            char login_url[256] = {};
             char last_error[192] = {};
-            WgnxCtlPeer peers[WGNX_CTL_MAX_PEERS] = {};
-            u32 peer_count = 0;  // active, which can be more than fit in peers
+            char conf_name[WGNX_CTL_CONF_NAME_MAX] = {};
+            WgnxPeerInfo peers[WGNX_CTL_MAX_PEERS] = {};
+            u32 peer_count = 0;  // configured, which can be more than fit in peers
         };
 
         Thread g_thread;
@@ -60,6 +57,12 @@ namespace {
         std::atomic<bool> g_stop_done{false};
         Result g_stop_rc = 0;
         u32 g_stop_code = 0;
+        std::atomic<bool> g_set_conf{false};       // a SetConf to send (g_conf_to_set, under g_mutex)
+        std::atomic<bool> g_set_conf_done{false};
+        char g_conf_to_set[WGNX_CTL_CONF_NAME_MAX] = {};
+        char g_conf_set[WGNX_CTL_CONF_NAME_MAX] = {};  // the name the last SetConf was for
+        Result g_set_conf_rc = 0;
+        u32 g_set_conf_code = 0;
         std::atomic<u64> g_call_since{0};  // system tick the current request began, 0: none
 
         Service g_session;  // the thread's own
@@ -98,12 +101,12 @@ namespace {
                 s.status_ok = R_SUCCEEDED(Call([] { return serviceDispatchOut(&g_session, 0, s.status); }));
                 if (!s.status_ok) Close();  // the process went away
             }
-            if (s.status_ok && s.status.state == WGNX_CTL_NEEDS_LOGIN) GetString(1, s.login_url, sizeof s.login_url);
-            if (s.status_ok) GetString(3, s.last_error, sizeof s.last_error);
-            if (s.status_ok && s.status.version >= 3 && s.status.state == WGNX_CTL_CONNECTED) {
+            if (s.status_ok) GetString(2, s.last_error, sizeof s.last_error);
+            if (s.status_ok) GetString(5, s.conf_name, sizeof s.conf_name);
+            if (s.status_ok) {
                 u32 n = 0;
                 const Result rc = Call([&] {
-                    return serviceDispatchOut(&g_session, 5, n, .buffer_attrs = {SfBufferAttr_HipcMapAlias | SfBufferAttr_Out},
+                    return serviceDispatchOut(&g_session, 4, n, .buffer_attrs = {SfBufferAttr_HipcMapAlias | SfBufferAttr_Out},
                                               .buffers = {{s.peers, sizeof s.peers}});
                 });
                 s.peer_count = R_SUCCEEDED(rc) ? n : 0;
@@ -133,7 +136,7 @@ namespace {
                     struct {
                         u32 code, detail;
                     } out = {};
-                    g_stop_rc = Call([&] { return serviceDispatchOut(&g_session, 4, out); });
+                    g_stop_rc = Call([&] { return serviceDispatchOut(&g_session, 3, out); });
                     g_stop_code = out.code;
                     g_stop = false;
                     g_stop_done = true;
@@ -141,7 +144,21 @@ namespace {
                 const int paused = g_set_paused.exchange(-1);
                 if (g_open && paused >= 0) {
                     const u8 v = static_cast<u8>(paused);
-                    Call([&] { return serviceDispatchIn(&g_session, 2, v); });
+                    Call([&] { return serviceDispatchIn(&g_session, 1, v); });
+                }
+                if (g_open && g_set_conf.exchange(false)) {
+                    static char name[WGNX_CTL_CONF_NAME_MAX];
+                    mutexLock(&g_mutex);
+                    std::snprintf(name, sizeof name, "%s", g_conf_to_set);
+                    mutexUnlock(&g_mutex);
+                    u32 code = 0;
+                    g_set_conf_rc = Call([&] {
+                        return serviceDispatchOut(&g_session, 6, code, .buffer_attrs = {SfBufferAttr_HipcMapAlias | SfBufferAttr_In},
+                                                  .buffers = {{name, std::strlen(name)}});
+                    });
+                    g_set_conf_code = code;
+                    std::snprintf(g_conf_set, sizeof g_conf_set, "%s", name);
+                    g_set_conf_done = true;
                 }
                 Refresh();
                 if (paused >= 0) g_pause_pending = false;
@@ -249,10 +266,6 @@ namespace {
     // the ctl thread sends it while the overlay keeps drawing.
     void BeginStop() {
         if (!g_have_ctl || g_phase != Phase::Idle) return;
-        if (g_status.version < 2) {
-            Say("This wireguard-nx is too old to stop here.", "Update it, or restart the console.");
-            return;
-        }
         ctl::g_stop_done = false;
         ctl::g_stop = true;
         ctl::Wake();
@@ -417,24 +430,57 @@ namespace {
         }
     }
 
-    char g_login_url[256] = {};
     char g_last_error[192] = {};
-    WgnxCtlPeer g_peers[WGNX_CTL_MAX_PEERS] = {};
-    u32 g_peer_count = 0;  // active; the first (up to WGNX_CTL_MAX_PEERS) are in g_peers
-    u32 g_peers_shown = 0;  // how many are in g_peers, most recently used first
+    char g_conf_name[WGNX_CTL_CONF_NAME_MAX] = {};
+    WgnxPeerInfo g_peers[WGNX_CTL_MAX_PEERS] = {};
+    u32 g_peer_count = 0;  // configured; the first (up to WGNX_CTL_MAX_PEERS) are in g_peers
+    u32 g_peers_shown = 0;  // how many are in g_peers
     u8 g_by_name[WGNX_CTL_MAX_PEERS] = {};  // g_peers indices in name order
-
-    // The login link as a QR code (encoded once per link).
-    uint8_t g_qr[qrcodegen_BUFFER_LEN_MAX];
-    uint8_t g_qr_tmp[qrcodegen_BUFFER_LEN_MAX];
-    char g_qr_for[256] = {};
-    bool g_qr_ok = false;
 
     void CtlSetPaused(bool paused) {
         if (!g_have_ctl || g_phase != Phase::Idle) return;
         ctl::g_pause_pending = true;
         ctl::g_set_paused = paused;
         ctl::Wake();
+    }
+
+    // Asks the sysmodule to switch to another .conf; the outcome lands in
+    // the message drawer (see Poll).
+    void CtlSetConf(const char *name) {
+        if (!g_have_ctl || g_phase != Phase::Idle) return;
+        mutexLock(&ctl::g_mutex);
+        std::snprintf(ctl::g_conf_to_set, sizeof ctl::g_conf_to_set, "%s", name);
+        mutexUnlock(&ctl::g_mutex);
+        ctl::g_set_conf_done = false;
+        ctl::g_set_conf = true;
+        ctl::Wake();
+        Note("Switching...");
+    }
+
+    void FinishSetConf() {
+        ctl::g_set_conf_done = false;
+        char line[96];
+        if (R_FAILED(ctl::g_set_conf_rc)) {
+            Say("No answer from wireguard-nx.", "Try again in a moment.");
+            return;
+        }
+        switch (ctl::g_set_conf_code) {
+            case WGNX_CTL_CONF_OK:
+                std::snprintf(line, sizeof line, "Switched to %s.", ctl::g_conf_set);
+                Note(line);
+                break;
+            case WGNX_CTL_CONF_NOT_FOUND:
+                std::snprintf(line, sizeof line, "%s: not found.", ctl::g_conf_set);
+                Say(line);
+                break;
+            case WGNX_CTL_CONF_INVALID:
+                std::snprintf(line, sizeof line, "%s doesn't load:", ctl::g_conf_set);
+                Say(line, "see the status above.");
+                break;
+            default:
+                Say("Busy; try again in a moment.");
+                break;
+        }
     }
 
     // Takes the ctl thread's latest answers.
@@ -450,24 +496,25 @@ namespace {
         for (u32 i = 0; i < g_peers_shown; i++) g_by_name[i] = static_cast<u8>(i);
         // Listed by name, so rows stay put as traffic moves between peers.
         std::sort(g_by_name, g_by_name + g_peers_shown, [](u8 a, u8 b) { return std::strcmp(g_peers[a].name, g_peers[b].name) < 0; });
-        std::snprintf(g_login_url, sizeof g_login_url, "%s", s.login_url);
         std::snprintf(g_last_error, sizeof g_last_error, "%s", s.last_error);
-        if (std::strcmp(g_login_url, g_qr_for) != 0) {
-            std::snprintf(g_qr_for, sizeof g_qr_for, "%s", g_login_url);
-            g_qr_ok = g_login_url[0] && qrcodegen_encodeText(g_login_url, g_qr_tmp, g_qr, qrcodegen_Ecc_LOW, qrcodegen_VERSION_MIN,
-                                                             qrcodegen_VERSION_MAX, qrcodegen_Mask_AUTO, true);
-        }
+        std::snprintf(g_conf_name, sizeof g_conf_name, "%s", s.conf_name);
+        if (ctl::g_set_conf_done) FinishSetConf();
     }
 
-    const char *RegionName(u32 id) {
-        // Tailscale's DERP region ids (the common ones).
-        static const char *const names[] = {
-            nullptr,       "New York",  "San Francisco", "Singapore", "Frankfurt", "Sydney",  "Bangalore",  "Tokyo",
-            "London",      "Dallas",    "Seattle",       "Sao Paulo", "Chicago",   "Denver",  "Amsterdam",  "Johannesburg",
-            "Miami",       "Los Angeles", "Paris",       "Madrid",    "Hong Kong", "Toronto", "Warsaw",     "Dubai",
-            "Honolulu",    "Nairobi",   "Nuremberg",     "Ashburn",
-        };
-        return id < sizeof names / sizeof names[0] ? names[id] : nullptr;
+    // "12 s ago", "4 min ago", "2 h ago".
+    void Ago(u32 secs, char *out, size_t cap) {
+        if (secs < 60) std::snprintf(out, cap, "%u s ago", secs);
+        else if (secs < 3600) std::snprintf(out, cap, "%u min ago", secs / 60);
+        else if (secs < 86400) std::snprintf(out, cap, "%u h ago", secs / 3600);
+        else std::snprintf(out, cap, "%u d ago", secs / 86400);
+    }
+
+    // "1.2 MB", "340 KB", "12 B".
+    void Bytes(u64 n, char *out, size_t cap) {
+        if (n >= 1'000'000'000) std::snprintf(out, cap, "%llu.%llu GB", static_cast<unsigned long long>(n / 1'000'000'000), static_cast<unsigned long long>(n / 100'000'000 % 10));
+        else if (n >= 1'000'000) std::snprintf(out, cap, "%llu.%llu MB", static_cast<unsigned long long>(n / 1'000'000), static_cast<unsigned long long>(n / 100'000 % 10));
+        else if (n >= 1000) std::snprintf(out, cap, "%llu KB", static_cast<unsigned long long>(n / 1000));
+        else std::snprintf(out, cap, "%llu B", static_cast<unsigned long long>(n));
     }
 
     // ---- drawing ------------------------------------------------------------
@@ -538,25 +585,24 @@ namespace {
         }
     }
 
-    // How a peer is reached: "Direct 4 ms", or "via London 45 ms" when
-    // relayed. Too wide for `w` pixels, the city is cut ("via Johanne...
-    // 180 ms"), never the latency.
-    void PeerPath(tsl::gfx::Renderer *r, const WgnxCtlPeer &p, s32 w, char *out, size_t cap) {
-        char ms[12] = "";
-        if (p.latency_ms) std::snprintf(ms, sizeof ms, " %u ms", p.latency_ms);
-        const char *via = p.direct ? nullptr : RegionName(p.relay_region);
-        if (!via) {
-            std::snprintf(out, cap, "%s%s", p.direct ? "Direct" : "Relayed", ms);
-            return;
-        }
-        std::snprintf(out, cap, "via %s%s", via, ms);
-        for (int n = static_cast<int>(std::strlen(via)) - 1; n > 0 && TextWidth(r, out, 17) > w; n--) {
-            if (via[n - 1] == ' ') continue;  // not "Sao ..."
-            std::snprintf(out, cap, "via %.*s...%s", n, via, ms);
+    // A peer's state in a few words: when it last handshook, or why not.
+    void PeerState(const WgnxPeerInfo &p, char *out, size_t cap) {
+        if (p.last_handshake_s != UINT32_MAX) {
+            Ago(p.last_handshake_s, out, cap);
+        } else if (p.flags & WGNX_PEER_RESOLVING) {
+            std::snprintf(out, cap, "Resolving...");
+        } else if (!p.endpoint_port) {
+            std::snprintf(out, cap, "Waiting for it");
+        } else {
+            std::snprintf(out, cap, "No handshake");
         }
     }
 
-    tsl::Color PathColor(const WgnxCtlPeer &p) { return p.direct ? Green : Yellow; }
+    // Green: a session; yellow: had one; grey: never.
+    tsl::Color StateColor(const WgnxPeerInfo &p) {
+        if (p.flags & WGNX_PEER_SESSION) return Green;
+        return p.last_handshake_s != UINT32_MAX ? Yellow : Grey;
+    }
 
     // No internet connection (not while paused or stopping: then it's moot).
     bool Offline() {
@@ -595,12 +641,15 @@ namespace {
         }
         if (g_status_ok) {
             switch (g_status.state) {
-                case WGNX_CTL_STARTING:    state = "Starting...";          color = Blue;   break;
-                case WGNX_CTL_NEEDS_LOGIN: state = "Log in needed";        color = Yellow; break;
-                case WGNX_CTL_CONNECTING:  state = g_status.ipv4[0] ? "Reconnecting..." : "Connecting..."; color = Blue; break;
-                case WGNX_CTL_CONNECTED:   state = "Connected";            color = Green;  break;
-                case WGNX_CTL_PAUSED:      state = "Paused";               color = Grey;   break;
-                case WGNX_CTL_STOPPING:    state = "Stopping...";          color = Grey;   break;
+                case WGNX_CTL_STARTING:    state = "Starting...";   color = Blue;   break;
+                case WGNX_CTL_CONNECTING:  state = "Connecting..."; color = Blue;   break;
+                case WGNX_CTL_CONNECTED:   state = g_status.peers_up ? "Connected" : "Idle"; color = g_status.peers_up ? Green : Yellow; break;
+                case WGNX_CTL_PAUSED:      state = "Paused";        color = Grey;   break;
+                case WGNX_CTL_STOPPING:    state = "Stopping...";   color = Grey;   break;
+            }
+            if ((g_status.flags & WGNX_CTL_FLAG_CONF_ERROR) && g_status.state != WGNX_CTL_PAUSED && g_status.state != WGNX_CTL_STOPPING) {
+                state = "Config error";
+                color = Red;
             }
             if (Offline()) {
                 state = "Offline";
@@ -640,6 +689,12 @@ namespace {
             r->drawString("It reconnects once the Switch is back online.", false, x + 20, y + 102, 17, r->a(Grey));
             return;
         }
+        if ((g_status.flags & WGNX_CTL_FLAG_CONF_ERROR) && g_status.state != WGNX_CTL_PAUSED) {
+            // "wg0.conf: line 12: PublicKey: not valid base64"
+            DrawTwoLines(r, g_last_error[0] ? g_last_error : "The .conf didn't load.", x + 20, y + 75, 15, Grey, 46);
+            r->drawString("Fix it, or pick another one under Config.", false, x + 20, y + 120, 15, r->a(Grey));
+            return;
+        }
         if (Stalled()) {
             // It answers, but its engine loop hasn't run: it can't connect.
             std::snprintf(line, sizeof line, "It has made no progress for %u seconds.", g_status.engine_stalled_s);
@@ -655,17 +710,14 @@ namespace {
             r->drawString(line, false, x + 20, ly, 20, r->a(White));
             ly += 27;
         }
-        if (g_status.version >= 3) {
-            std::snprintf(line, sizeof line, "%u peers", g_status.peers);
+        if (g_status.state == WGNX_CTL_CONNECTED && g_status.peers_up == 0) {
+            std::snprintf(line, sizeof line, "No peer has answered in the last 3 minutes.");
+        } else if (g_status.state == WGNX_CTL_CONNECTED) {
+            std::snprintf(line, sizeof line, "%u of %u peer%s up", g_status.peers_up, g_status.peers, g_status.peers == 1 ? "" : "s");
+        } else if (g_status.state == WGNX_CTL_CONNECTING) {
+            std::snprintf(line, sizeof line, g_status.peers ? "No handshake yet (%u peer%s)." : "No peers in the .conf.", g_status.peers, g_status.peers == 1 ? "" : "s");
         } else {
-            // Older sysmodules: the home relay, and "direct" once any peer was.
-            const char *region = RegionName(g_status.home_derp);
-            char relay[48] = "";
-            if (g_status.home_derp) {
-                if (region) std::snprintf(relay, sizeof relay, ", relay %s", region);
-                else std::snprintf(relay, sizeof relay, ", relay region %u", g_status.home_derp);
-            }
-            std::snprintf(line, sizeof line, "%u peers%s%s", g_status.peers, relay, (g_status.flags & WGNX_CTL_FLAG_DIRECT) ? ", direct" : "");
+            std::snprintf(line, sizeof line, "%u peer%s", g_status.peers, g_status.peers == 1 ? "" : "s");
         }
         r->drawString(line, false, x + 20, ly, 17, r->a(Grey));
         ly += 28;
@@ -676,36 +728,17 @@ namespace {
         }
     }
 
-    // The login QR code, or what's active once connected.
-    void DrawLogin(tsl::gfx::Renderer *r, s32 x, s32 y, s32 w, s32 h) {
-        if (g_status_ok && g_status.state == WGNX_CTL_NEEDS_LOGIN && g_qr_ok) {
-            r->drawString("Scan to log in, then approve this Switch:", false, x + 20, y + 25, 17, r->a(White));
-            const int n = qrcodegen_getSize(g_qr);
-            const int quiet = 3, scale = std::max(1, std::min((w - 40) / (n + 2 * quiet), (h - 80) / (n + 2 * quiet)));
-            const int side = (n + 2 * quiet) * scale;
-            const s32 qx = x + (w - side) / 2, qy = y + 40;
-            r->drawRect(qx, qy, side, side, r->a(White));
-            for (int my = 0; my < n; my++) {
-                for (int mx = 0; mx < n; mx++) {
-                    if (qrcodegen_getModule(g_qr, mx, my)) {
-                        r->drawRect(qx + (quiet + mx) * scale, qy + (quiet + my) * scale, scale, scale, r->a(Black));
-                    }
-                }
-            }
-            // The link itself, for typing: drop the scheme to save width.
-            const char *shown = std::strncmp(g_login_url, "https://", 8) == 0 ? g_login_url + 8 : g_login_url;
-            r->drawString(shown, false, x + 20, qy + side + 28, 15, r->a(Grey), w - 40);
-            return;
-        }
+    // What's active, and the memory line.
+    void DrawInfo(tsl::gfx::Renderer *r, s32 x, s32 y, s32 w, s32 h) {
         s32 ty = y + 30;
         auto line = [&](const char *text, tsl::Color c) {
             r->drawString(text, false, x + 20, ty, 17, r->a(c));
             ty += 28;
         };
         if (!g_status_ok) return;
-        if (g_status.flags & WGNX_CTL_FLAG_MITM) line("Homebrew apps can reach tailnet addresses.", White);
-        if (g_status.flags & WGNX_CTL_FLAG_MAGICDNS) line("Tailnet names resolve (e.g. in Moonlight).", White);
-        if (g_status.state == WGNX_CTL_PAUSED) line("Paused: tailnet connections fail until resumed.", Grey);
+        if (g_status.flags & WGNX_CTL_FLAG_MITM) line("Homebrew apps can reach tunnel addresses.", White);
+        if (g_status.flags & WGNX_CTL_FLAG_HOSTS) line("Peer names resolve (e.g. in Moonlight).", White);
+        if (g_status.state == WGNX_CTL_PAUSED) line("Paused: tunnel connections fail until resumed.", Grey);
         if (g_status.memory_kb) {
             char mem[96];
             std::snprintf(mem, sizeof mem, "Memory: %u.%u MB. System free: %u.%u MB.", g_status.memory_kb / 1024,
@@ -764,36 +797,146 @@ namespace {
     // One element that scrolls itself: Tesla's lists scroll by moving focus
     // between items, and items can't safely come and go while one has it,
     // but peers come and go all the time.
+    // The peer whose details page is open.
+    char g_detail_name[sizeof(WgnxPeerInfo::name)] = {};
+
+    void DrawPeer(tsl::gfx::Renderer *r, s32 x, s32 y, s32 w, s32 h) {
+        const WgnxPeerInfo *p = nullptr;
+        for (u32 i = 0; i < g_peers_shown; i++)
+            if (std::strcmp(g_peers[i].name, g_detail_name) == 0) p = &g_peers[i];
+        if (!p) {
+            r->drawString("This peer is no longer in the .conf.", false, x + 20, y + 30, 17, r->a(Grey));
+            return;
+        }
+        s32 ty = y + 30;
+        auto line = [&](const char *label, const char *value, tsl::Color c) {
+            r->drawString(label, false, x + 20, ty, 17, r->a(Grey));
+            r->drawString(value, false, x + 20 + 150, ty, 17, r->a(c));
+            ty += 30;
+        };
+        char v[64];
+        PeerState(*p, v, sizeof v);
+        line("Handshake", v, StateColor(*p));
+        if (p->ipv4[0] || p->ipv4[1] || p->ipv4[2] || p->ipv4[3]) std::snprintf(v, sizeof v, "%u.%u.%u.%u", p->ipv4[0], p->ipv4[1], p->ipv4[2], p->ipv4[3]);
+        else std::snprintf(v, sizeof v, "(no /32 in AllowedIPs)");
+        line("Address", v, White);
+        if (p->endpoint_port) {
+            std::snprintf(v, sizeof v, "%u.%u.%u.%u:%u%s", p->endpoint_ip[0], p->endpoint_ip[1], p->endpoint_ip[2], p->endpoint_ip[3], p->endpoint_port,
+                          (p->flags & WGNX_PEER_ROAMED) ? " (moved)" : (p->flags & WGNX_PEER_ENDPOINT_NAME) ? " (by name)" : "");
+        } else if (p->flags & WGNX_PEER_RESOLVING) {
+            std::snprintf(v, sizeof v, "resolving its name...");
+        } else {
+            std::snprintf(v, sizeof v, "none: it must contact us");
+        }
+        line("Endpoint", v, White);
+        if (p->last_rx_s != UINT32_MAX) Ago(p->last_rx_s, v, sizeof v);
+        else std::snprintf(v, sizeof v, "never");
+        line("Last packet", v, White);
+        char rx[24], tx[24];
+        Bytes(p->rx_bytes, rx, sizeof rx);
+        Bytes(p->tx_bytes, tx, sizeof tx);
+        std::snprintf(v, sizeof v, "%s in, %s out", rx, tx);
+        line("Transfer", v, White);
+        if (p->keepalive_s) std::snprintf(v, sizeof v, "every %u s", p->keepalive_s);
+        else std::snprintf(v, sizeof v, "off");
+        line("Keepalive", v, White);
+        std::snprintf(v, sizeof v, "%u prefix%s%s", p->allowed_ips, p->allowed_ips == 1 ? "" : "es", (p->flags & WGNX_PEER_DEFAULT_ROUTE) ? " (default route)" : "");
+        line("Allowed IPs", v, White);
+        line("Preshared key", (p->flags & WGNX_PEER_PSK) ? "yes" : "no", White);
+    }
+
+    class PeerGui : public tsl::Gui {
+        public:
+            tsl::elm::Element *createUI() override {
+                auto *frame = new tsl::elm::OverlayFrame("WireGuard", g_detail_name);
+                auto *list = new tsl::elm::List();
+                list->addItem(new Drawer(DrawPeer), 290);
+                frame->setContent(list);
+                return frame;
+            }
+
+            void update() override {
+                if (++m_frames % 30 != 0) return;
+                Poll();
+                Refresh();
+            }
+
+        private:
+            u32 m_frames = 0;
+    };
+
+    // The .conf files in config/wireguard-nx, to switch between. The list
+    // is built once when the page opens (Tesla's items can't come and go
+    // while one has focus).
+    class ConfGui : public tsl::Gui {
+        public:
+            tsl::elm::Element *createUI() override {
+                auto *frame = new tsl::elm::OverlayFrame("WireGuard", "Config");
+                auto *list = new tsl::elm::List();
+                struct Name {
+                    char s[WGNX_CTL_CONF_NAME_MAX];
+                };
+                static Name names[16];
+                int n = 0;
+                tsl::hlp::doWithSDCardHandle([&] {
+                    if (DIR *d = opendir("sdmc:/config/wireguard-nx")) {
+                        while (dirent *e = readdir(d)) {
+                            const size_t len = std::strlen(e->d_name);
+                            if (n >= 16 || len < 6 || len >= WGNX_CTL_CONF_NAME_MAX || std::strcmp(e->d_name + len - 5, ".conf") != 0) continue;
+                            std::snprintf(names[n++].s, WGNX_CTL_CONF_NAME_MAX, "%s", e->d_name);
+                        }
+                        closedir(d);
+                    }
+                });
+                std::sort(names, names + n, [](const Name &a, const Name &b) { return std::strcmp(a.s, b.s) < 0; });
+                if (n == 0) {
+                    list->addItem(new tsl::elm::ListItem("No .conf files in config/wireguard-nx"));
+                }
+                for (int i = 0; i < n; i++) {
+                    const char *name = names[i].s;
+                    auto *item = new tsl::elm::ListItem(name, std::strcmp(name, g_conf_name) == 0 ? "Active" : "");
+                    item->setClickListener([name](u64 keys) {
+                        if (!(keys & HidNpadButton_A)) return false;
+                        CtlSetConf(name);
+                        tsl::goBack();
+                        return true;
+                    });
+                    list->addItem(item);
+                }
+                list->addItem(new Drawer([](tsl::gfx::Renderer *r, s32 x, s32 y, s32, s32) {
+                    r->drawString("Pick one to switch to it now and at every boot.", false, x + 20, y + 25, 15, r->a(Grey));
+                    r->drawString("Put more .conf files in config/wireguard-nx.", false, x + 20, y + 47, 15, r->a(Grey));
+                }), 70);
+                frame->setContent(list);
+                return frame;
+            }
+    };
+
     class PeerTable : public tsl::elm::Element {
         public:
             void draw(tsl::gfx::Renderer *r) override {
                 const s32 x = getX(), y = getY(), w = getWidth(), h = getHeight();
-                if (!g_status_ok || g_status.state != WGNX_CTL_CONNECTED) {
-                    r->drawString("Not connected.", false, x + 20, y + 30, 17, r->a(Grey));
+                if (!g_status_ok) {
+                    r->drawString("Not running.", false, x + 20, y + 30, 17, r->a(Grey));
                     return;
                 }
-                if (g_status.version < 3) {
-                    r->drawString("This wireguard-nx is too old to list them.", false, x + 20, y + 30, 17, r->a(Grey));
-                    r->drawString("Update it to see its connections.", false, x + 20, y + 55, 17, r->a(Grey));
-                    return;
-                }
+                char line[160];
                 if (g_peer_count > g_peers_shown) {
-                    char line[64];
-                    std::snprintf(line, sizeof line, "%u in use; the %u used last are listed.", g_peer_count, g_peers_shown);
-                    r->drawString(line, false, x + 20, y + 25, 15, r->a(Grey));
+                    std::snprintf(line, sizeof line, "%u peers in %s; the first %u are listed.", g_peer_count, g_conf_name, g_peers_shown);
                 } else {
-                    r->drawString("Devices used in the last 45 seconds.", false, x + 20, y + 25, 15, r->a(Grey));
+                    std::snprintf(line, sizeof line, "Peers in %s. Press A for details.", g_conf_name[0] ? g_conf_name : "the .conf");
                 }
-                r->drawString("Direct is fastest; via a city means it's relayed.", false, x + 20, y + 47, 15, r->a(Grey));
+                r->drawString(line, false, x + 20, y + 25, 15, r->a(Grey));
+                r->drawString("Green: a handshake in the last 3 minutes.", false, x + 20, y + 47, 15, r->a(Grey));
                 const u32 n = g_peers_shown;
                 if (n == 0) {
-                    r->drawString("None right now.", false, x + 20, y + 95, 17, r->a(White));
+                    r->drawString("No peers configured.", false, x + 20, y + 95, 17, r->a(White));
                     return;
                 }
                 Follow(n);
                 const s32 top = y + RowsTop, visible = Visible(h);
                 for (u32 row = m_top; row < n && row < m_top + static_cast<u32>(visible); row++) {
-                    const WgnxCtlPeer &p = g_peers[g_by_name[row]];
+                    const WgnxPeerInfo &p = g_peers[g_by_name[row]];
                     const s32 ry = top + static_cast<s32>(row - m_top) * RowHeight;
                     if (row == m_sel) {
                         r->drawRect(x + 6, ry, w - 12, RowHeight, r->a(Selected));  // a 2-pixel border
@@ -804,17 +947,17 @@ namespace {
                     const s32 left = x + 20, right = x + w - 20, gap = 14;
                     const s32 half = (right - left - gap) / 2, name_w = p.name[0] ? TextWidth(r, p.name, 17) : 0;
                     char full[48], path[48];
-                    PeerPath(r, p, 1 << 20, full, sizeof full);
+                    PeerState(p, full, sizeof full);
                     const s32 full_w = TextWidth(r, full, 17);
                     const s32 path_w = std::min(full_w, std::max(half, right - left - gap - name_w));
-                    PeerPath(r, p, path_w, path, sizeof path);
+                    Fit(r, full, 17, path_w, path, sizeof path);
                     const s32 room = right - path_w - gap - left;
                     const bool long_name = name_w > room, long_path = full_w > path_w;
                     if (row == m_sel) Turns(long_name, long_path);
                     if (row == m_sel && long_path && m_turn == PathTurn) {
-                        Marquee(r, full, right - path_w, ry, path_w, PathColor(p));
+                        Marquee(r, full, right - path_w, ry, path_w, StateColor(p));
                     } else {
-                        r->drawString(path, false, right - TextWidth(r, path, 17), ry + 22, 17, r->a(PathColor(p)));
+                        r->drawString(path, false, right - TextWidth(r, path, 17), ry + 22, 17, r->a(StateColor(p)));
                     }
                     if (!p.name[0]) continue;
                     if (row == m_sel && long_name && m_turn == NameTurn) {
@@ -845,7 +988,12 @@ namespace {
 
             // Up and down move the selection (repeating while held, as in
             // Tesla's lists); B goes back.
-            bool handleInput(u64, u64 held, const HidTouchState &, HidAnalogStickState, HidAnalogStickState) override {
+            bool handleInput(u64 down_keys, u64 held, const HidTouchState &, HidAnalogStickState, HidAnalogStickState) override {
+                if ((down_keys & HidNpadButton_A) && g_peers_shown > 0) {
+                    std::snprintf(g_detail_name, sizeof g_detail_name, "%s", g_peers[g_by_name[m_sel]].name);
+                    tsl::changeTo<PeerGui>();
+                    return true;
+                }
                 const bool up = held & HidNpadButton_AnyUp, down = held & HidNpadButton_AnyDown;
                 if (up == down) {
                     m_repeat = 0;
@@ -916,7 +1064,7 @@ namespace {
             static constexpr u32 NameTurn = 0, PathTurn = 1;
 
             u32 m_sel = 0, m_top = 0;
-            char m_sel_name[sizeof(WgnxCtlPeer::name)] = {};
+            char m_sel_name[sizeof(WgnxPeerInfo::name)] = {};
             s32 m_scroll = 0, m_wait = 0;
             u32 m_turn = NameTurn;
             u32 m_repeat = 0;
@@ -925,7 +1073,7 @@ namespace {
     class PeersGui : public tsl::Gui {
         public:
             tsl::elm::Element *createUI() override {
-                auto *frame = new tsl::elm::OverlayFrame("Tailscale", "Connections");
+                auto *frame = new tsl::elm::OverlayFrame("WireGuard", "Connections");
                 frame->setContent(new PeerTable());
                 return frame;
             }
@@ -944,19 +1092,19 @@ namespace {
         public:
             tsl::elm::Element *createUI() override {
                 Refresh();
-                auto *frame = new tsl::elm::OverlayFrame("Tailscale", "wireguard-nx " APP_VERSION);
+                auto *frame = new tsl::elm::OverlayFrame("WireGuard", "wireguard-nx " APP_VERSION);
                 auto *list = new tsl::elm::List();
                 list->addItem(new Drawer(DrawStatus), 135);
                 if (!g_status_ok) ReadWhyNotRunning();
 
-                m_toggle = new tsl::elm::ToggleListItem("Tailscale", !(g_status_ok && g_status.state == WGNX_CTL_PAUSED));
+                m_toggle = new tsl::elm::ToggleListItem("WireGuard", !(g_status_ok && g_status.state == WGNX_CTL_PAUSED));
                 m_toggle->setStateChangedListener([](bool on) {
                     CtlSetPaused(!on);
                     Refresh();
                 });
                 list->addItem(m_toggle);
 
-                // Every peer in use, and how it's reached.
+                // Every peer, and when it last handshook.
                 m_peers = new tsl::elm::ListItem("Connections", PeersValue());
                 m_peers->setClickListener([](u64 keys) {
                     if (!(keys & HidNpadButton_A)) return false;
@@ -964,6 +1112,15 @@ namespace {
                     return true;
                 });
                 list->addItem(m_peers);
+
+                // Which .conf is in use; A picks another.
+                m_conf = new tsl::elm::ListItem("Config", g_conf_name[0] ? g_conf_name : "");
+                m_conf->setClickListener([](u64 keys) {
+                    if (!(keys & HidNpadButton_A)) return false;
+                    tsl::changeTo<ConfGui>();
+                    return true;
+                });
+                list->addItem(m_conf);
 
                 // Stop or start the sysmodule itself (not its boot setting).
                 m_power = new tsl::elm::ListItem(PowerLabel());
@@ -992,7 +1149,7 @@ namespace {
                 updates->setStateChangedListener([](bool on) { SetMarker(NoUpdateCheckPath, !on); });
                 list->addItem(updates);
 
-                list->addItem(new Drawer(DrawLogin), 330);
+                list->addItem(new Drawer(DrawInfo), 140);
                 list->addItem(new Drawer(DrawTip), 85);
                 frame->setContent(list);
                 return frame;
@@ -1012,6 +1169,13 @@ namespace {
                         m_peers_value = value;
                     }
                 }
+                if (m_conf) {
+                    const std::string value = g_status_ok && g_conf_name[0] ? g_conf_name : "";
+                    if (value != m_conf_value) {
+                        m_conf->setValue(value);
+                        m_conf_value = value;
+                    }
+                }
                 if (m_power) {
                     const char *label = PowerLabel();
                     if (label != m_power_label) {
@@ -1025,8 +1189,9 @@ namespace {
             enum class Action { None, Stop, Start, TurnBackOn };
 
             static std::string PeersValue() {
-                if (!g_status_ok || g_status.state != WGNX_CTL_CONNECTED || g_status.version < 3) return "";
-                return g_peer_count ? std::to_string(g_peer_count) + " active" : "None";
+                if (!g_status_ok || g_status.state == WGNX_CTL_STARTING) return "";
+                if (g_peer_count == 0) return "None";
+                return std::to_string(g_status.peers_up) + " of " + std::to_string(g_peer_count) + " up";
             }
 
             static Action PowerAction() {
@@ -1050,17 +1215,19 @@ namespace {
             tsl::elm::ToggleListItem *m_toggle = nullptr;
             tsl::elm::ListItem *m_peers = nullptr;
             std::string m_peers_value;
+            tsl::elm::ListItem *m_conf = nullptr;
+            std::string m_conf_value;
             tsl::elm::ListItem *m_power = nullptr;
             const char *m_power_label = nullptr;
             u32 m_frames = 0;
     };
 
-    // Ultrahand shows notifications (Taildrop, "Connected") only while its
+    // Ultrahand shows notifications ("Connected", updates) only while its
     // own menu is the loaded overlay, and a hidden Tesla overlay stays loaded.
     // With Ultrahand installed, hiding exits instead, back to a hidden menu.
     bool g_exit_on_hide = false;
 
-    class TailscaleOverlay : public tsl::Overlay {
+    class WireGuardOverlay : public tsl::Overlay {
         public:
             void initServices() override {
                 ctl::Start();
@@ -1092,5 +1259,5 @@ namespace {
 }
 
 int main(int argc, char **argv) {
-    return tsl::loop<TailscaleOverlay>(argc, argv);
+    return tsl::loop<WireGuardOverlay>(argc, argv);
 }

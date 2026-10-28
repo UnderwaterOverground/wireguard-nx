@@ -4,42 +4,42 @@
 [![License](https://img.shields.io/badge/license-GPL--2.0%20%2F%20BSD--3-blue)](#license)
 [![Discord](https://img.shields.io/badge/Discord-join-5865F2?logo=discord&logoColor=white)](https://discord.gg/GjUuBEqRYb)
 
-**Tailscale for the Nintendo Switch.** wireguard-nx runs in the background
-on a Switch with Atmosphère and puts it on your
-[Tailscale](https://tailscale.com) network (your *tailnet*). Homebrew such as
+**WireGuard for the Nintendo Switch.** wireguard-nx runs in the background
+on a Switch with Atmosphère and connects it to your own
+[WireGuard](https://www.wireguard.com) server: the one on your router, NAS
+or PC. Homebrew such as
 [Moonlight](https://github.com/XITRIX/Moonlight-Switch) can then reach your
-PC, NAS and other devices by their tailnet address or name, from anywhere,
-without opening ports on your router.
+PC and the rest of your home network from anywhere, without opening ports
+for each service.
 
-> wireguard-nx is an unofficial, community project. It is not affiliated
-> with or endorsed by Tailscale Inc. or Nintendo.
+> wireguard-nx is an unofficial, community project. "WireGuard" and the
+> "WireGuard" logo are registered trademarks of Jason A. Donenfeld; this
+> project is not affiliated with or endorsed by the WireGuard project or
+> Nintendo.
 
 ## Features
 
-<img src="docs/images/connections.png" align="right" width="280" alt="The overlay's Connections page: devices in use, each Direct or via a relay city, with latency">
+<img src="docs/images/connections.png" align="right" width="280" alt="The overlay's Connections page: each peer with the time of its last handshake">
 
 - **Starts at boot** and stays connected in the background, through sleep
   and wake.
-- **Homebrew reaches your tailnet:** apps launched from hbmenu can connect
-  to `100.x.y.z` addresses and tailnet names (MagicDNS). Nothing to set up
-  per app.
-- **Subnet routes:** reach devices on networks your tailnet shares through a
-  subnet router, such as a PC at home that doesn't run Tailscale.
-- **Direct connections** between devices where possible, with Tailscale's
-  relays (DERP) as a fallback, just like the official clients.
-- **Overlay** (Ultrahand): status, the Switch's tailnet IP, a pause switch,
-  stop and start, and a QR code for logging in. Its **Connections** page
-  lists the devices in use, whether each is reached directly or through a
-  relay, and the latency.
+- **Homebrew reaches the tunnel:** apps launched from hbmenu can connect
+  to the addresses in your WireGuard config (your server, and whatever
+  networks it routes). Nothing to set up per app.
+- **Plain WireGuard:** copy the `.conf` file any WireGuard server hands out
+  (Unraid, wg-easy, OPNsense, MikroTik, `wg-quick`...) to the SD card.
+  Pre-shared keys, several peers, host names as endpoints and persistent
+  keepalives all work.
+- **Peer names:** a `# Name = gaming-pc` comment in the config names a peer
+  in the overlay and lets Moonlight find it by that name.
+- **Overlay** (Ultrahand): status, the Switch's tunnel address, a pause
+  switch, stop and start, a **Connections** page listing every peer with its
+  last handshake, transfer and endpoint, and a **Config** page to switch
+  between `.conf` files.
 - **Update notice:** a notification at boot when a newer release is out
   (can be turned off).
-- **Easy login:** scan a QR code, or put an auth key in a config file. Key
-  expiry is handled.
-- **Taildrop:** send files to the Switch from your phone or computer. They
-  land in the SD card's `Taildrop` folder.
-- **Respects your tailnet's access rules (ACLs)** for incoming connections.
 - **Optional:** reach the Switch's [sys-ftpd](https://github.com/cathery/sys-ftpd)
-  over the tailnet.
+  through the tunnel.
 - **Small:** exactly 2.5 MB of memory, fixed when it starts.
 
 ## Before you start
@@ -53,11 +53,12 @@ You need:
 - **[Ultrahand Overlay](https://github.com/ppkantorski/Ultrahand-Overlay)**.
   To check you have it, press **L + D-pad Down + R3** (R3 is pressing the
   right stick in) on the home screen: a menu should appear over the screen.
-  You can do without it (see the [setup guide](docs/SETUP.md)), but logging
-  in is much easier with it.
-- **A free [Tailscale](https://tailscale.com) account**, with Tailscale
-  installed on the PC or other device you want the Switch to reach.
-  A [headscale](https://headscale.net) server works too.
+  You can do without it, but you'd miss the status screen and notifications.
+- **A WireGuard server** you can add a peer to: the VPN built into many
+  routers and NAS systems (Unraid, Synology, UniFi, OPNsense, pfSense,
+  Fritz!Box, MikroTik), [wg-easy](https://github.com/wg-easy/wg-easy), or
+  `wg-quick` on any Linux box. It needs to be reachable from the internet
+  (a forwarded UDP port) if you want to use the Switch away from home.
 
 ## Install
 
@@ -102,56 +103,88 @@ atmosphere/contents/4200000000005747/exefs.nsp
 switch/.overlays/wireguard-nx.ovl
 ```
 
-Put the SD card back in the Switch and turn it on as you normally would.
+### 3. Add the Switch to your WireGuard server
 
-### 3. Log in
+On your server, add a new peer (often called a client or device) for the
+Switch and download or copy its configuration. It's a short text file that
+looks like this:
 
-1. Wait for a **"Tailscale: log in needed"** notification. It appears within
-   a minute of the Switch connecting to Wi-Fi.
-2. Press **L + D-pad Down + R3** to open Ultrahand and choose **Tailscale**.
-3. Scan the QR code with your phone's camera, log in to Tailscale and
-   approve the Switch.
-4. The overlay changes to **Connected** and shows the Switch's address,
-   starting `100.`. You're done.
+```ini
+[Interface]
+PrivateKey = <the Switch's private key>
+Address = 10.253.0.2/32
 
-### 4. Stop it logging out after 6 months
+[Peer]
+# Name = gaming-pc
+PublicKey = <the server's public key>
+AllowedIPs = 10.253.0.1/32, 192.168.1.0/24
+Endpoint = home.example.com:51820
+PersistentKeepalive = 25
+```
 
-Tailscale makes devices log in again every 180 days. To stop that for the
-Switch, open the [Machines](https://login.tailscale.com/admin/machines) page,
-find **nintendo-switch**, open its **⋯** menu and choose **Disable key
-expiry**.
+Two things worth checking in it:
+
+- **`AllowedIPs`** says what the Switch reaches through the tunnel: the
+  server's own tunnel address, and your home network if the server shares it
+  ("remote access to LAN" on Unraid, "allowed IPs" elsewhere). A plain
+  `0.0.0.0/0` works too (then all of homebrew's internet traffic goes
+  through the server).
+- **`PersistentKeepalive = 25`** keeps the tunnel open through NAT. Add it if
+  it's missing.
+
+Add a `# Name = ...` comment under `[Peer]` if you like: that's the name the
+overlay shows, and the name Moonlight can use.
+
+Save it as **`wg0.conf`** in the SD card's `config/wireguard-nx` folder
+(create the folder if it isn't there), put the card back in the Switch and
+turn it on as you normally would.
+
+### 4. Check it's connected
+
+1. Within a minute of the Switch connecting to Wi-Fi, a **"Connected. IP:
+   10.x.x.x"** notification appears.
+2. Press **L + D-pad Down + R3** to open Ultrahand and choose **WireGuard**.
+   It shows **Connected** and the Switch's tunnel address. The
+   **Connections** page lists your server with the time of its last
+   handshake.
 
 ### It didn't work
 
-- **No notification after a few minutes:** check the two files above are in
-  exactly those places, and that you restarted the Switch (not just put it to
-  sleep and woke it).
-- **There's no Tailscale in Ultrahand's menu:** `wireguard-nx.ovl` isn't in
+- **No notification after a few minutes:** open the overlay. **Config
+  error** names the line of the `.conf` it couldn't read. **Connecting...**
+  with "No handshake yet" means the server didn't answer: check the
+  endpoint and port (and that the port is forwarded if you're away from
+  home), the keys, and that the server has the Switch as a peer.
+- **There's no WireGuard in Ultrahand's menu:** `wireguard-nx.ovl` isn't in
   `switch/.overlays`.
 - **Something else:** see [troubleshooting](docs/SETUP.md#troubleshooting).
 
 ### Updating
 
-Download the new zip and copy it over the old files the same way. Your login
-and settings are kept. Restart the Switch afterwards.
+Download the new zip and copy it over the old files the same way. Your
+configuration and settings are kept. Restart the Switch afterwards.
 
-The [setup guide](docs/SETUP.md) covers logging in with an auth key instead,
-all the settings, sys-ftpd and more.
+The [setup guide](docs/SETUP.md) covers setting up a peer on common servers,
+several configurations, all the settings, sys-ftpd and more.
 
 ## Using it with Moonlight
 
-Add your PC in Moonlight by its tailnet name (e.g. `gaming-pc`) or its
-`100.x` address. At home, Moonlight may find the PC on your local network
-and use that instead, which is fine. Away from home, it uses the tailnet.
+Add your PC in Moonlight by its peer name (e.g. `gaming-pc`) or by an
+address the tunnel reaches (its address on your home network, if the server
+routes that network, or the server's tunnel address if the PC is the
+server). At home, Moonlight may find the PC on the local network and use
+that instead, which is fine. Away from home, it uses the tunnel.
 
-Streams are smoothest over a direct connection. While streaming, open the
-overlay's **Connections** page: "Direct" is best, and "via" a city means the
-stream is relayed through Tailscale's server there, which adds latency.
+Streams stay smooth up to about 25 Mbit/s at 720p or 1080p, close to what
+the Switch's Wi-Fi manages on its own. If a stream stutters at a higher
+bitrate, turn it down in Moonlight's settings. Artemis picks 35 Mbit/s for
+1080p, so lower it to around 25.
 
-Over a direct connection, streams stay smooth up to about 25 Mbit/s at 720p
-or 1080p, close to what the Switch's Wi-Fi manages on its own. If a stream
-stutters at a higher bitrate, turn it down in Moonlight's settings. Artemis
-picks 35 Mbit/s for 1080p, so lower it to around 25.
+## Several configurations
+
+Put more than one `.conf` in `config/wireguard-nx` (say `home.conf` and
+`away.conf`) and pick one on the overlay's **Config** page. It switches at
+once and stays the choice at the next boot.
 
 ## Known limitations
 
@@ -159,13 +192,15 @@ picks 35 Mbit/s for 1080p, so lower it to around 25.
   and home-screen forwarders (those with title IDs starting `01` need
   listing in `mitm_titles`, see the
   [setup guide](docs/SETUP.md#home-screen-forwarders)). Games and Nintendo's
-  apps don't use the tailnet.
-- **No exit nodes:** only tailnet addresses and your tailnet's subnet routes
-  go through Tailscale.
-- **No Tailscale SSH**, and Taildrop only receives (the Switch can't send
-  files).
-- The Switch connects to the internet over **IPv4 only** (tailnet IPv6
-  addresses work).
+  apps don't use the tunnel.
+- **One tunnel at a time**, and the Switch connects to the server over
+  **IPv4 only** (IPv6 addresses inside the tunnel work).
+- **No DNS through the tunnel:** `DNS =` in the config is ignored. Peer
+  names from `# Name = ...` comments resolve; other names don't.
+- **Addresses on the Switch's own Wi-Fi network are reached directly**, not
+  through the tunnel, even when `AllowedIPs` covers them (as on any
+  computer: the local network is nearer). Away from home they go through
+  the tunnel.
 - To stop wireguard-nx while it runs, use **Stop** in its own overlay
   (close homebrew apps first). The Sysmodules overlay can't stop it: turning
   it off there takes a restart.
@@ -175,9 +210,14 @@ picks 35 Mbit/s for 1080p, so lower it to around 25.
 ## Questions
 
 **Does it affect games or online play?** No. It only handles traffic from
-homebrew to tailnet addresses. It doesn't change how games or Nintendo
-services connect. MagicDNS leaves Atmosphère's DNS blocking of Nintendo
-servers in place.
+homebrew to the addresses in your configuration. It doesn't change how games
+or Nintendo services connect, and Atmosphère's DNS blocking of Nintendo
+servers is left in place.
+
+**Can I use it with Tailscale?** That's what
+[tailscale-nx](https://github.com/UnderwaterOverground/tailscale-nx) is
+for. Both can be installed, but only one can serve homebrew at a time: turn
+the other one off in Sysmodules.
 
 **The console crashes (orange screen) when I wake it during a Moonlight
 stream.** That's a Moonlight-Switch bug
@@ -185,14 +225,11 @@ stream.** That's a Moonlight-Switch bug
 happens with wireguard-nx turned off too. Until it's fixed, end the stream
 before putting the console to sleep.
 
-**Artemis won't open a second time.** After a stream, Artemis can't start
-again from the same hbmenu session, with or without wireguard-nx. Close
-hbmenu from the HOME menu and open it again.
-
-**Is my traffic private?** Like the official Tailscale clients, tailnet
-traffic is encrypted end to end with WireGuard. Tailscale's servers
-coordinate keys and relay encrypted packets when a direct connection isn't
-possible.
+**Is my traffic private?** Traffic to the addresses in your configuration
+is encrypted end to end with WireGuard, between the Switch and your server.
+Nothing goes anywhere else: there's no account and no relay. The only other
+connection wireguard-nx makes is the update check to GitHub, which you can
+turn off.
 
 **Something's wrong.** See [troubleshooting](docs/SETUP.md#troubleshooting).
 For help, ask on [Discord](https://discord.gg/GjUuBEqRYb) or
@@ -206,9 +243,11 @@ and most of it can be tested on a computer without a Switch.
 
 ## Credits
 
-wireguard-nx builds on:
+wireguard-nx is a fork of
+[tailscale-nx](https://github.com/UnderwaterOverground/tailscale-nx), with
+the Tailscale parts replaced by plain WireGuard. It builds on:
 - **[tailscale-rs](https://github.com/tailscale/tailscale-rs):** Tailscale's
-  Rust components (WireGuard, keys, disco).
+  Rust WireGuard implementation (`ts_tunnel`) and key types.
 - **Libraries:**
   - [Atmosphère](https://github.com/Atmosphere-NX/Atmosphere)'s libstratosphere
   - [libnx](https://github.com/switchbrew/libnx)
@@ -216,10 +255,10 @@ wireguard-nx builds on:
   - [smoltcp](https://github.com/smoltcp-rs/smoltcp)
   - [rustls](https://github.com/rustls/rustls)
   - [RustCrypto](https://github.com/RustCrypto)
-  - [QR Code generator](https://www.nayuki.io/page/qr-code-generator-library)
 - **Ideas:** from [sys-GRID0](https://github.com/redluigi323/sys-GRID0),
   [ryu_ldn_nx](https://github.com/Ethiquema/ryu_ldn_nx) and
-  [wireguard-nx](https://github.com/chrisbraucker/wireguard-nx).
+  [chrisbraucker's wireguard-nx](https://github.com/chrisbraucker/wireguard-nx),
+  an earlier, unrelated project of the same name.
 
 See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for licences.
 

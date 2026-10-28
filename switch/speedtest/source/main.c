@@ -1,6 +1,6 @@
 // wireguard-nx speedtest: TCP and UDP throughput to tools/speedtest-server.py
 // and the cost of single socket calls, once per server address (its LAN
-// address, then its tailnet address), plus SD card write speed and the
+// address, then its tunnel address), plus SD card write speed and the
 // engine's crypto benchmark. Output goes to nxlink.
 //
 //   nxlink -s speedtest.nro [+bsctu] <server ip> [<server ip> ...]
@@ -199,7 +199,7 @@ static void bench(void) {
 }
 
 // Microseconds per call of each socket operation the data path uses, on a
-// UDP socket to `ip` (a tailnet address goes through the sysmodule's engine;
+// UDP socket to `ip` (a tunnel address goes through the sysmodule's engine;
 // any other only through the MITM's passthrough).
 static void calls(const char *ip) {
     int s = udp_open(ip);
@@ -221,7 +221,7 @@ static void calls(const char *ip) {
     printf("  per call: getsockopt %.0f us, recv (empty) %.0f us, send %d B %.0f us\n", opt, rcv, DGRAM, snd);
 }
 
-// SD card write speed by write size, as Taildrop's writes would see it:
+// SD card write speed by write size, as a file download would see it:
 // appending (each write extends the file), or into a file whose size was
 // set first.
 static void sd_write(size_t size, bool preallocate) {

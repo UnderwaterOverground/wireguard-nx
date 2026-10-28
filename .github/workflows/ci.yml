@@ -16,5 +16,3 @@ jobs:
         run: cargo test -p wgnx-core
       - name: Unit tests with the Switch's buffer limits
         run: cargo test -p wgnx-core --features switch-limits
-      - name: Taildrop file saving
-        run: make drop-test

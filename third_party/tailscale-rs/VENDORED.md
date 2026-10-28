@@ -5,7 +5,7 @@
 - License: BSD-3-Clause, see `LICENSE` and `PATENTS` in this directory (copied unmodified from upstream).
   All vendored crates keep their upstream `license = "BSD-3-Clause"` metadata and README files.
 
-This directory is a standalone Cargo workspace, excluded from the tailscale-nx root workspace. The crates
+This directory is a standalone Cargo workspace, excluded from the wireguard-nx root workspace. The crates
 were ported to `#![no_std]` + `alloc` so they build for `aarch64-nintendo-switch-freestanding`
 (no OS clock, no OS RNG, no std). Every non-trivial source change is marked with a `// tsnx:` comment;
 `grep -rn "tsnx:" .` lists them.
@@ -14,18 +14,21 @@ were ported to `#![no_std]` + `alloc` so they build for `aarch64-nintendo-switch
 
 | Crate | Purpose |
 |---|---|
-| `ts_keys` | Typed X25519 keys (machine, node, disco, network-lock, DERP, challenge) |
-| `ts_packet` | `Packet` / `PacketMut` buffers |
+| `ts_keys` | Typed X25519 keys (node keys are WireGuard's; the `to_crypto_box` conversions were dropped with the `crypto_box` dependency) |
+| `ts_packet` | `Packet` / `PacketMut` buffers (`aead::Buffer` implemented through the `aead` crate directly) |
 | `ts_util` | `fmt` and `fn_` helpers, plus the new `rng` hook (the `futures` module was dropped) |
-| `ts_control_serde` | Control-plane JSON types (`MapRequest`, `MapResponse`, `RegisterRequest`, `DerpMap`, `Node`, ...) |
-| `ts_capabilityversion`, `ts_nodecapability`, `ts_packetfilter_serde`, `ts_peercapability` | Dependencies of `ts_control_serde` |
-| `ts_disco_protocol` | Disco message encoding/decoding and NaCl-box encryption |
 | `ts_noise` | Noise IK (control) and IKpsk2 (WireGuard) handshakes |
 | `ts_tunnel` | Sans-IO WireGuard endpoint |
 | `ts_time` | Event scheduler used by `ts_tunnel`, now also the `no_std` `Instant` type |
 
 Not vendored (tokio/hyper/OS based): `ts_control`, `ts_control_noise`, `ts_derp`, `ts_runtime`, `ts_netcheck`,
 `ts_http_util`, `ts_tls_util`, `ts_dataplane`, `ts_netstack_smoltcp` and the rest of the upstream workspace.
+wireguard-nx also dropped the crates its Tailscale-era ancestor used for the control plane and disco
+(`ts_control_serde` and its helpers, `ts_disco_protocol`).
+
+wireguard-nx additions (marked `// wgnx:`): `ts_tunnel::Endpoint::peer_last_handshake` and
+`peer_session_active`, with the `last_handshake` timestamp recorded when a session is activated in
+either role.
 `ts_tunnel/examples/` (tokio/clap) was not vendored either.
 
 ## Workspace-level changes

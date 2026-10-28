@@ -7,27 +7,27 @@ machine, without a console), and what we learned along the way.
 
 | Path | What |
 |---|---|
-| `crates/wgnx-core` | Sans-IO engine, `no_std + alloc`. It contains: <ul><li>ts2021 control: Noise IK, HTTP/2 + HPACK, register/map poll</li><li>DERP client</li><li>WireGuard via vendored `ts_tunnel`</li><li>smoltcp netstack with a socket API</li><li>a pure-Rust rustls provider</li></ul> It never touches sockets, clocks or OS RNGs; drivers inject them. |
+| `crates/wgnx-core` | Sans-IO engine, `no_std + alloc`. It contains: <ul><li>the wg-quick `.conf` parser (`config.rs`)</li><li>WireGuard via vendored `ts_tunnel`, plus what it leaves to us: AllowedIPs routing, endpoints and roaming, keepalives, the 15 s re-handshake rule, statistics (`engine/`)</li><li>smoltcp netstack with a socket API</li><li>a pure-Rust rustls provider (for the update check)</li></ul> It never touches sockets, clocks or OS RNGs; drivers inject them. |
 | `crates/wgnx-ffi` | C ABI (`include/wgnx.h`), built as a staticlib for the Switch and for host C tests |
-| `crates/wgnx-host` | Rust host driver with diagnostics: `selftest`, `tls-probe`, `control-probe`, `up` |
-| `native/driver` | Portable POSIX C driver loop plus shared app logic (key state, echo test). The same code runs on macOS and libnx. |
-| `native/host` | `wgnx-c`, a host CLI over the C driver, to test the Switch code paths on the Mac |
+| `crates/wgnx-host` | Rust host driver: `up --conf`, `check`, `genkey`, `selftest`, `tls-probe` |
+| `native/driver` | Portable POSIX C driver loop (one UDP socket) plus shared app logic (clock check, echo test, update check). The same code runs on macOS and libnx. |
+| `native/host` | `wgnx-c`, a host CLI over the C driver, to test the Switch code paths on the Mac (including suspend/resume) |
 | `native/runtime` | C++ runtime: runs the engine on its own thread for multi-threaded callers |
-| `native/vsock` | Socket virtualization. It decides per socket between the real stack and the tailnet, splits poll/select, and handles blocking semantics. The MITM is built on it. |
+| `native/vsock` | Socket virtualization. It decides per socket between the real stack and the tunnel (`IsTunnel`: our addresses and every peer's AllowedIPs, minus the local network), splits poll/select, and handles blocking semantics. The MITM is built on it. |
 | `native/interpose` | `libwgnx_interpose`: runs unmodified programs through `native/vsock` (DYLD on macOS, LD_PRELOAD on Linux), plus `vsock-test` |
-| `switch/sysmodule` | The boot2 sysmodule (libstratosphere): engine, `bsd:u` MITM (plus `bsd:s` for sys-ftpd), MagicDNS hosts file, the `wgnx:ctl` status service, sleep handling and the crash guard |
-| `switch/overlay` | Tesla/Ultrahand overlay: status, pause switch, stop/start, login QR code |
+| `switch/sysmodule` | The boot2 sysmodule (libstratosphere): engine, `bsd:u` MITM (plus `bsd:s` for sys-ftpd), the hosts file for peer names, the `wgnx:ctl` status service, sleep handling and the crash guard |
+| `switch/overlay` | Tesla/Ultrahand overlay: status, pause switch, stop/start, peers with details, config picker |
 | `switch/app` | `wgnx-app.nro`: the engine in a homebrew app, with status, an echo self-test and a crypto benchmark (developer tool) |
 | `switch/speedtest` | `speedtest.nro`: throughput, socket call costs and SD card writes through the sysmodule, against `tools/speedtest-server.py` (developer tool) |
-| `third_party/tailscale-rs` | Vendored, `no_std`-ported crates from tailscale-rs (BSD-3). See `VENDORED.md`. |
-| `e2e/` | Local tailnet: headscale (control, DERP, STUN) plus a stock `tailscaled` peer with TCP/UDP echo (port 7), HTTP (8080) and iperf3 (5201). `run-tests.sh` is the automated suite. |
+| `third_party/tailscale-rs` | Vendored, `no_std`-ported crates from tailscale-rs (BSD-3): `ts_tunnel`, `ts_noise`, `ts_keys`, `ts_packet`, `ts_time`, `ts_util`. See `VENDORED.md`. |
+| `e2e/` | Two stock WireGuard peers (the Docker VM's kernel WireGuard through `wg-quick`) with TCP/UDP echo (port 7), HTTP (8080) and iperf3 (5201). `run-tests.sh` is the automated suite. |
 
 ## Build and test
 
 Requirements: Rust (stable for the host, nightly is pulled into the Docker image) and Docker.
 
 ```sh
-make host-test        # unit tests: crypto vectors, HPACK RFC vectors, HTTP/2, Noise, DERP, netstack
+make host-test        # unit tests: crypto vectors, the .conf parser, two engines handshaking, netstack
 make docker-image     # once: devkitA64 + libnx + Rust nightly (native arm64)
 make sysmodule        # switch/sysmodule/dist: atmosphere/contents/4200000000005747 (exefs.nsp, boot2 flag)
 make overlay          # switch/overlay/wireguard-nx.ovl
@@ -35,56 +35,51 @@ tools/stage-sd.sh     # dist/sd: a ready-to-copy SD tree (Atmosphère, hekate, s
 make nro              # switch/app/wgnx-app.nro
 make host-c           # target/wgnx-c (C driver + FFI on the Mac)
 make interpose        # target/libwgnx_interpose.dylib + target/vsock-test
+make routes-test      # the socket layer's tunnel-address rules
 make runtime-test     # the runtime's non-blocking pause and resume (links the shim)
-make e2e              # local tailnet + the full end-to-end suite (Docker)
+make e2e              # local WireGuard peers + the full end-to-end suite (Docker)
 ```
 
-`make e2e` checks the following against a stock `tailscaled`:
-- TCP/UDP echo, upgrading to a direct path
-- the same with direct UDP blocked (DERP only)
-- inbound disco ping and ICMP
+`make e2e` checks the following against the kernel WireGuard in Docker's VM:
+- TCP/UDP echo after a handshake; handshake retries after 20 s of packet loss
+- inbound ICMP; PersistentKeepalive traffic while idle
 - the socket virtualization suite and unmodified curl through the shim
 - a 50 Mbit/s UDP stream (Moonlight-like) and a TCP bulk upload through the shim
-- replacing an expired node key, both while running (auth key) and at startup (login URL)
-- losing the control server and getting it back (the engine's control events)
+- inbound listeners reachable (no access rules); a subnet reached only when AllowedIPs has it
+- pre-shared keys (and a wrong one refused); an `Endpoint` host name that only resolves later
+- roaming to a new port; several peers; an endpoint-less peer contacted by the server
+- a broken `.conf` reported with its line, with the shim staying out of the way
+- `wgnx-c --sleep-test`: echo again right after suspend/resume (the console's wake path)
 
-Typical results on a Mac's Docker VM: 50 Mbit/s UDP at 0% loss; about 800 Mbit/s TCP up and 680 Mbit/s down.
+Typical results on a Mac's Docker VM: 50 Mbit/s UDP at 0% loss; about 590 Mbit/s TCP up.
 
-### Local tailnet (no console needed)
+### Local peers (no console needed)
 
 ```sh
-e2e/setup.sh          # headscale + peer1 (100.64.0.1) with echo services; prints the auth key
-# Rust driver:
-WGNX_EXTRA_ROOT=e2e/state/certs/ca.der \
-WGNX_CONNECT_MAP=headscale:443=127.0.0.1:8443,172.30.0.10:443=127.0.0.1:8443 \
-  cargo run -p wgnx-host -- up --control https://headscale --authkey "$(cat e2e/state/authkey)" \
-    --state e2e/state/host/mac.state --echo-test 100.64.0.1
+e2e/setup.sh          # two WireGuard peers (10.7.0.1, 10.7.0.9) and client .conf files in e2e/state/
+# Rust driver (host side; the peers are only reachable from the compose network):
+cd e2e && docker compose run --rm wgnx up --conf /state/client.conf --echo-test 10.7.0.1 --expect-handshake
 # C driver (what the Switch runs):
-WGNX_CONNECT_MAP=headscale:443=127.0.0.1:8443,172.30.0.10:443=127.0.0.1:8443 \
-  target/wgnx-c --control https://headscale --authkey "$(cat e2e/state/authkey)" \
-    --extra-root e2e/state/certs/ca.der --state e2e/state/host/c.state --echo-test 100.64.0.1
-# Inbound from the stock client:
-docker compose -f e2e/docker-compose.yml exec peer tailscale ping --icmp <wgnx ip>
+docker compose run --rm --entrypoint /src/target/linux/wgnx-c wgnx --conf /state/client.conf --echo-test 10.7.0.1
 e2e/down.sh           # tear down and delete state
 ```
 
-`WGNX_CONNECT_MAP` lets the Mac reach the container hostnames through the
-published port. It is for development only.
+On the Mac itself, two engines can talk through real sockets: make two
+confs with `wgnx-host genkey`, run `wgnx-host up --conf b.conf` (with a
+`ListenPort`) and `wgnx-host up --conf a.conf --expect-handshake`.
 
 The sysmodule's boot-time update check (`native/driver/wgnx_update.c`) runs
 the same way against the real GitHub. Pass the version to compare with:
 
 ```sh
-target/wgnx-c --update-check 1.0.0   # latest 1.2.0: newer
+target/wgnx-c --update-check 1.0.0
 ```
 
-### Running unmodified programs over the tailnet (the MITM's code paths)
+### Running unmodified programs through the tunnel (the MITM's code paths)
 
 ```sh
-WGNX_CONTROL_URL=https://headscale WGNX_EXTRA_ROOT=e2e/state/certs/ca.der \
-WGNX_CONNECT_MAP=headscale:443=127.0.0.1:8443,172.30.0.10:443=127.0.0.1:8443 \
-WGNX_STATE=e2e/state/host/interpose.state WGNX_AUTHKEY="$(cat e2e/state/authkey)" WGNX_WAIT_READY=1 \
-DYLD_INSERT_LIBRARIES=target/libwgnx_interpose.dylib target/vsock-test 100.64.0.1 1.1.1.1:443
+WGNX_CONF=e2e/state/preload.conf WGNX_WAIT_READY=1 \
+DYLD_INSERT_LIBRARIES=target/libwgnx_interpose.dylib target/vsock-test 10.7.0.1 1.1.1.1:443 10.7.0.3
 ```
 
 `WGNX_TRACE=1` logs every intercepted socket call. `WGNX_LOG_LEVEL=1..5` shows
@@ -103,8 +98,8 @@ Sysmodule loop (a console with sys-ftpd, reachable at `<switch ip>`):
    first: the `bsd:u` MITM must outlive every client session, so Stop refuses
    while any is open). The Sysmodules overlay must never kill it.
 3. Watch the log: set `log_udp=<your ip>:5514` in
-   `config/wireguard-nx/config.ini` and run `nc -ul 5514`, or read
-   `config/wireguard-nx/sysmodule.log(.1)`.
+   `config/wireguard-nx/config.ini` and listen with a small UDP socket, or
+   read `config/wireguard-nx/sysmodule.log(.1)`.
 
 Crashes are logged with module-relative offsets (`CRASH desc ... pc +0x...`);
 resolve them with `aarch64-none-elf-addr2line -e switch/sysmodule/wireguard-nx.elf`.
@@ -112,25 +107,28 @@ resolve them with `aarch64-none-elf-addr2line -e switch/sysmodule/wireguard-nx.e
 `switch/app` (`wgnx-app.nro`) runs the same engine as an ordinary homebrew
 app with an echo self-test and a crypto benchmark (`make nxlink
 NXLINK_HOST=<switch ip>` streams its output). Don't run it alongside the
-sysmodule: they share node keys.
+sysmodule with the same `.conf`: the server would see one key from two
+places.
 
 `switch/speedtest` (`speedtest.nro`) measures what homebrew gets through
 the sysmodule: TCP and UDP throughput each way, the cost of single socket
 calls, SD card write speed and the crypto benchmark. Run
 `tools/speedtest-server.py` (port 5300, Python 3) on a wired machine that is
-also on the tailnet, then give the test both of its addresses, so each
-result has a LAN baseline next to it:
+also a peer, then give the test both of its addresses, so each result has a
+LAN baseline next to it:
 
 ```sh
-make nxlink-speedtest NXLINK_HOST=<switch ip> SPEEDTEST_SERVERS="<lan ip> <tailnet ip>"
+make nxlink-speedtest NXLINK_HOST=<switch ip> SPEEDTEST_SERVERS="<lan ip> <tunnel ip>"
 # only some tests: SPEEDTEST_ARGS=+sc (b crypto, s SD card, c call costs, t TCP, u UDP)
 ```
 
-Results (handheld on Wi-Fi, server on 2.5 GbE): on the LAN, TCP about 42
-Mbit/s down and 50 up, and UDP without loss up to 30 Mbit/s down and 50 up.
-Over the tailnet on 1.2.0, UDP without loss up to 35 Mbit/s down (17% lost
-at 50) and about 37 up (15 and 25 on 1.1.3); TCP was about 13 each way on
-1.1.3.
+tailscale-nx 1.2.0, which this code comes from, measured (handheld on
+Wi-Fi, server on 2.5 GbE): on the LAN, TCP about 42 Mbit/s down and 50 up,
+and UDP without loss up to 30 Mbit/s down and 50 up; through its tunnel, UDP
+without loss up to 35 Mbit/s down and about 37 up. wireguard-nx's data path
+is the same (ChaCha20-Poly1305 in `ts_tunnel`, smoltcp), with a bigger MTU
+(1420 instead of 1280), so expect at least that; console figures go here
+once measured.
 
 ### A complete SD card tree
 
@@ -145,6 +143,12 @@ rsync -rtv --exclude .DS_Store dist/sd/ /Volumes/<SD card>/
 dot_clean -m /Volumes/<SD card>
 ```
 
+### Test-only settings
+
+- `tunnel_lan=on` in `config.ini` sends addresses on the console's own LAN
+  through the tunnel too when `AllowedIPs` covers them (normally they're
+  reached directly), to test a stream from a local host through the server.
+
 ## Releases
 
 `make release` builds `dist/wireguard-nx-<version>.zip` (the files to
@@ -153,21 +157,41 @@ match `switch/overlay/Makefile` and `switch/sysmodule/res/app.json`.
 Pushing a `v*` tag builds and publishes the same zip on GitHub
 (`.github/workflows/publish.yml`).
 
+## Memory
+
+The sysmodule takes exactly 2.5 MB (`tools/footprint.sh` sizes the heap to
+fill it; `heap_size.h` is committed with the code that moved it).
+`tools/map-sizes.py switch/sysmodule/build/wireguard-nx.map` shows what the
+binary is made of. Compared with tailscale-nx 1.2.0, dropping the control
+plane, DERP, disco and Taildrop took the Rust code from 615 KB to 430 KB
+and grew the heap from 768 KB to 952 KB; rustls (the update check) is the
+largest remaining piece after WireGuard and the netstack.
+
 ## Notes and findings
 
-- **Disco keys are persisted.** Go clients make a new disco key every run,
-  and peers reset their WireGuard sessions when they see one. That races with
-  the handshake a restarted node starts straight away, and costs about 15 s
-  of dead traffic. Persisting the key, which is no more linkable than the
-  persistent node key, avoids the race. Data arriving for an unknown session
-  triggers an immediate re-handshake.
+- **`ts_tunnel` leaves endpoints, keepalives and routing to the caller.** The
+  engine keeps a current endpoint per peer (configured, resolved from a
+  name, or wherever its last authenticated packet came from: roaming works
+  in both roles), routes outbound packets by longest AllowedIPs prefix and
+  drops inbound ones whose source isn't in the peer's AllowedIPs
+  (cryptokey routing), and sends an empty packet as the keepalive. With a
+  live session that packet becomes a 32-byte keepalive; without one it
+  queues and `ts_tunnel` starts a handshake, so the same "kick" serves
+  PersistentKeepalive, first contact, reconnecting after a wake and the
+  15 s no-response rule.
 - **The engine adds WireGuard's "no response for 15 s, re-handshake" rule**,
-  which `ts_tunnel` lacks.
-- **DERP servers queue only 32 packets per client.** Bursts beyond that are
-  dropped, as with any Tailscale client, and TCP recovers.
-- **Consoles often have wrong clocks** (HATS-style DNS blocklists block Nintendo NTP; one test console
-  was at 2053), which breaks TLS. The app prefers the network clock, and falls back to the control
-  server's HTTP `Date` (bounded to [build date, build date + 3 years]) with an on-screen warning.
-- **Home DERP is chosen by latency** (STUN to every region, re-checked every 5 minutes, with hysteresis).
-- **Tailscale's STUN servers** only answer requests that carry
-  `SOFTWARE=tailnode` and a FINGERPRINT.
+  which `ts_tunnel` lacks, and records the last handshake time (a small
+  `// wgnx:` patch to `ts_tunnel`).
+- **Host names in `Endpoint=`** are resolved by the driver on request
+  (`WGNX_EVENT_RESOLVE`): at start, after the network changes, every 30 s
+  while there is no handshake and again when the last one is older than
+  135 s (wg-quick's reresolve-dns). On the console the lookup runs off the
+  runtime lock, between engine rounds, so it never stalls homebrew.
+- **A `.conf` can be swapped at runtime** (`wgnx_engine_reload`): the
+  netstack and its socket ids survive, sessions start over. A broken file
+  leaves what was running in place.
+- **Consoles often have wrong clocks** (HATS-style DNS blocklists block
+  Nintendo NTP; one test console was at 2053), which breaks TLS, and
+  WireGuard too: handshake timestamps must never go backwards for a key,
+  or the peer ignores the initiation as a replay. The sysmodule falls back
+  to github.com's HTTP `Date` (bounded to [build date, build date + 3 years]).

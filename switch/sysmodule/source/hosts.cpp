@@ -11,7 +11,7 @@ namespace ams::hosts {
 
     namespace {
 
-        constexpr const char BeginMarker[] = "# >>> wireguard-nx: tailnet names, rewritten automatically; edit outside this block >>>\n";
+        constexpr const char BeginMarker[] = "# >>> wireguard-nx: peer names, rewritten automatically; edit outside this block >>>\n";
         constexpr const char EndMarker[] = "# <<< wireguard-nx <<<\n";
 
         // Atmosphère aborts (taking the console down) on a hosts file of
@@ -159,7 +159,7 @@ namespace ams::hosts {
 
         char path[0x60];
         if (!SelectPath(path, sizeof path)) {
-            Log("hosts: no Atmosphere hosts file to add tailnet names to");
+            Log("hosts: no Atmosphere hosts file to add peer names to");
             return;
         }
 
@@ -185,7 +185,7 @@ namespace ams::hosts {
         std::memcpy(text.get() + len, block.get(), block_len);
         len += block_len;
         if (len > MaxFile) {
-            Log("hosts: %s would grow past %zu KB; not adding tailnet names", path, MaxFile / 1024);
+            Log("hosts: %s would grow past %zu KB; not adding peer names", path, MaxFile / 1024);
             return;
         }
 
@@ -201,7 +201,7 @@ namespace ams::hosts {
         }
         g_last_block_hash = hash;
         ReloadAtmosphereHosts();
-        Log("hosts: %d tailnet names in %s", count, path);
+        Log("hosts: %d peer names in %s", count, path);
     }
 
 }

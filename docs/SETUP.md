@@ -1,13 +1,13 @@
 # Setting up wireguard-nx
 
-wireguard-nx puts a modded Switch on your [Tailscale](https://tailscale.com)
-tailnet. It runs in the background from boot. Homebrew such as Moonlight can
-then reach your other devices by their `100.x` addresses or tailnet names,
-from anywhere.
+wireguard-nx connects a modded Switch to your own
+[WireGuard](https://www.wireguard.com) server. It runs in the background
+from boot. Homebrew such as Moonlight can then reach your PC and home network
+through the tunnel, from anywhere.
 
 It affects **homebrew only** (apps launched from hbmenu or another homebrew
 launcher, and home-screen forwarders). Games and Nintendo's own apps never
-see the tailnet.
+see the tunnel.
 
 ## What you need
 
@@ -15,9 +15,8 @@ see the tailnet.
   the [NH Switch Guide](https://switch.hacks.guide/).
 - **[Ultrahand Overlay](https://github.com/ppkantorski/Ultrahand-Overlay)**
   with nx-ovlloader. It is optional, but you need it for the status screen,
-  the login QR code and the log-in toast.
-- A **Tailscale account**. A self-hosted [headscale](https://headscale.net)
-  works too.
+  the peer list, the config picker and the notifications.
+- A **WireGuard server** you can add a peer to (see below).
 
 ## Install
 
@@ -28,102 +27,100 @@ card, adding them to the folders already there:
 | Path | What |
 |---|---|
 | `atmosphere/contents/4200000000005747/` | The sysmodule. `flags/boot2.flag` makes it start at boot. |
-| `switch/.overlays/wireguard-nx.ovl` | The overlay: status, the connections in use, a pause switch, stop and start, and the login QR code |
+| `switch/.overlays/wireguard-nx.ovl` | The overlay: status, peers, a pause switch, config picker, stop and start |
 | `config/wireguard-nx/config.ini.example` | Settings template (optional; see below) |
+| `config/wireguard-nx/wg0.conf` | Your tunnel configuration (you make this one, see below) |
 
 Then restart the console.
 
-## Join your tailnet
+## The configuration file
 
-Pick one of two ways.
+wireguard-nx reads the same `[Interface]` / `[Peer]` file as `wg-quick` and
+every WireGuard app. Your server makes one when you add a peer for the
+Switch; save it as `config/wireguard-nx/wg0.conf` on the SD card.
 
-### A. Log in with a link (no setup)
+```ini
+[Interface]
+PrivateKey = <the Switch's private key>
+Address = 10.253.0.2/32
 
-1. Within a minute of booting, Ultrahand shows a **"Tailscale: log in needed"**
-   toast. It contains the link and the button combo for the overlay.
-2. Open the overlay. The default is **L + D-pad Down + R3**; the toast shows
-   yours. Choose **Tailscale**.
-3. Scan the QR code with your phone, log in to Tailscale and approve the
-   Switch.
-4. The overlay changes to **Connected** and shows the Switch's `100.x`
-   address.
+[Peer]
+# Name = gaming-pc
+PublicKey = <the server's public key>
+PresharedKey = <optional>
+AllowedIPs = 10.253.0.1/32, 192.168.1.0/24
+Endpoint = home.example.com:51820
+PersistentKeepalive = 25
+```
 
-The link is also saved to `config/wireguard-nx/login.txt` on the SD card, in
-case you don't use Ultrahand.
+- **`AllowedIPs`** is what the Switch reaches through the tunnel: the
+  server's tunnel address, plus your home network if the server routes it.
+  `0.0.0.0/0` sends all of homebrew's internet traffic through the server
+  (fine, but slower, and your server sees it all).
+- **`Endpoint`** is the server as seen from the internet: a host name
+  (dynamic DNS is fine; it's looked up again when the tunnel goes quiet)
+  or an address, and the UDP port forwarded to it.
+- **`PersistentKeepalive = 25`** keeps NAT mappings alive. Add it if your
+  server's file doesn't have it.
+- **`# Name = gaming-pc`** under a `[Peer]` names it (the overlay, and the
+  hosts file, so Moonlight can use the name). Unraid's `#Tower` style and
+  wg-easy's `### Client: name` are understood too. Names are lowercased and
+  spaces become `-`.
+- `DNS`, `MTU`, `ListenPort` and the `PostUp`-style lines of wg-quick are
+  accepted; `DNS` and the scripts are ignored. Several `[Peer]` sections
+  work, as do IPv6 addresses inside the tunnel.
 
-### B. Use an auth key (nothing to do on the console)
+### On common servers
 
-1. Go to [Settings → Keys](https://login.tailscale.com/admin/settings/keys) in
-   the Tailscale admin console and choose **Generate auth key**.
-2. Choose its settings:
-   - **Reusable: on.** If the Switch ever needs to log in again, it can do so
-     on its own, as long as the auth key itself hasn't expired (see below).
-   - **Ephemeral: off.** Tailscale deletes ephemeral devices soon after they
-     go offline, and a Switch goes offline every time it sleeps.
-   - **Expiration:** how long the key can add devices, up to 90 days. It
-     doesn't limit the Switch once the Switch is added.
-   - **Tags:** optional. Tagged devices have key expiry turned off by
-     default, but you need a tag your account is allowed to use.
-3. Copy `config/wireguard-nx/config.ini.example` to `config.ini` in the same
-   folder, and set `auth_key=tskey-auth-…`.
-4. Restart the console.
+- **Unraid (VPN Manager):** Settings → VPN Manager, add a peer with
+  "Remote access to LAN" (so the Switch reaches your network), Apply, then
+  download its config or scan nothing: copy the text from "Peer
+  configuration". Set the tunnel active.
+- **wg-easy:** add a client, download its `.conf`.
+- **OPNsense, pfSense, MikroTik, UniFi, Synology, Fritz!Box:** each has a
+  WireGuard page where you add a peer and export its configuration.
+- **Linux with `wg`:** make a key pair (`wg genkey | tee switch.key | wg
+  pubkey > switch.pub`), add `[Peer] PublicKey = <switch.pub> AllowedIPs =
+  10.x.x.x/32` to the server, and write the Switch's file by hand from the
+  example above.
 
-Treat `config.ini` like a password while it contains the key. Anyone with the
-key can add devices to your tailnet. Once the Switch has joined, you can
-delete the line.
-
-## Turn off key expiry
-
-By default, Tailscale makes every device log in again after **180 days**
-(this is called key expiry). Until it does, the device is cut off. A Switch is
-easy to forget about, so turn expiry off for it:
-
-1. Open the [Machines](https://login.tailscale.com/admin/machines) page and
-   find the Switch (default name `nintendo-switch`).
-2. Open its **⋯** menu and choose **Disable key expiry**.
-
-If the key does expire, wireguard-nx handles it the way Tailscale's own
-clients do. It makes a new key and registers it in place of the old one:
-
-- **With a reusable auth key in `config.ini`** that is still valid, it
-  reconnects on its own.
-- **Otherwise**, you get the same log-in toast and QR code as in way A.
-  After you approve, the Switch keeps its name and `100.x` address.
-
-Until either happens, the Switch can't reach the tailnet.
+Treat the `.conf` like a password: it contains the Switch's private key,
+and anyone with it can join your network as the Switch.
 
 ## Using it
 
-- **Moonlight:** add your PC by its tailnet name (e.g. `gaming-pc`) or its
-  `100.x` address. At home, Moonlight may also find the PC on the local
-  network and use that, which is fine. Away from home, it uses the tailnet.
-- **MagicDNS:** tailnet names are written into the hosts file Atmosphère is
-  using (`atmosphere/hosts/emummc.txt`, `sysmmc.txt` or `default.txt`). They
-  update when your tailnet changes.
+- **Moonlight:** add your PC by its peer name (e.g. `gaming-pc`) or by an
+  address the tunnel reaches. At home, Moonlight may also find the PC on
+  the local network and use that, which is fine. Away from home, it uses the
+  tunnel.
+- **Peer names:** names from the `.conf` are written into the hosts file
+  Atmosphère is using (`atmosphere/hosts/emummc.txt`, `sysmmc.txt` or
+  `default.txt`), pointing at each peer's first `/32` in `AllowedIPs`.
   - Atmosphère's Nintendo blocking is left alone, and names containing
     "nintendo" are never added.
-  - If there's no hosts file, MagicDNS stays off. wireguard-nx never creates
-    one.
+  - If there's no hosts file, names stay off. wireguard-nx never creates
+    one. `hosts=off` in `config.ini` turns this off.
 - **Connected notice:** after each boot, a 5-second toast shows
-  "Connected. IP: 100.x.y.z" the first time the Switch connects. It doesn't
+  "Connected. IP: 10.x.y.z" the first time a peer handshakes. It doesn't
   appear again on wake or reconnect. Turn it off with **Connection notice**
   in the overlay.
-- **Taildrop:** send files to the Switch from your other devices (see
-  [below](#taildrop)).
 - **Update notice:** after each boot, 10 seconds after it connects,
   wireguard-nx asks GitHub for the latest release. If it's newer than the
-  installed one, a 10-second toast says so. If GitHub can't be reached, nothing happens (the
-  reason is in `sysmodule.log`). This request shows GitHub the console's
-  public IP address, as any web request does. Nothing else is sent. Turn
-  it off with **Check for updates** in the overlay.
-- **Connections:** the overlay's **Connections** page lists the devices
-  the Switch has used in the last 45 seconds, by name, and how each is
-  reached: **Direct** (green), or **via** a city (yellow) when the traffic is
-  relayed through Tailscale's server there. Each shows the latency, the time
-  a message takes to get there and back. Relayed connections are slower;
-  see [Moonlight is slow away from home](#troubleshooting).
-- **Pause:** use the **Tailscale** switch in the overlay. While paused,
-  tailnet connections fail at once and everything else works normally.
+  installed one, a 10-second toast says so. If GitHub can't be reached,
+  nothing happens (the reason is in `sysmodule.log`). This request shows
+  GitHub the console's public IP address, as any web request does. Nothing
+  else is sent. Turn it off with **Check for updates** in the overlay.
+- **Connections:** the overlay's **Connections** page lists every peer in
+  the `.conf` with the time of its last handshake: green within the last 3
+  minutes (a live session), yellow if older, grey if never. Press **A** on
+  a peer for its endpoint, how much was sent and received, keepalive,
+  allowed IPs and whether it uses a pre-shared key.
+- **Config:** with several `.conf` files in `config/wireguard-nx`, the
+  overlay's **Config** page switches between them at once. The choice is
+  written to `config.ini` (`conf=`), so it stays at the next boot. A
+  `ListenPort` change takes effect at the next start.
+- **Pause:** use the **WireGuard** switch in the overlay. While paused,
+  tunnel connections fail at once and everything else works normally.
 - **Stop and start:** **Stop wireguard-nx** in the overlay ends the
   sysmodule and frees its memory, until the next boot or until you press
   **Start wireguard-nx**. Its boot setting doesn't change.
@@ -139,73 +136,35 @@ Until either happens, the Switch can't reach the tailnet.
   or restart. The Sysmodules overlay can't stop it itself: Atmosphère would
   freeze if its socket hook disappeared without being removed first.
 
-## Taildrop
+## AllowedIPs and your own network
 
-Send files to the Switch with [Taildrop](https://tailscale.com/kb/1106/taildrop),
-like to any of your devices: **Send with Tailscale** in the share menu
-(Windows, macOS, iOS, Android), or `tailscale file cp photo.jpg nintendo-switch:`.
+Addresses on the network the Switch is on are always reached directly,
+never through the tunnel, even when `AllowedIPs` covers them: at home,
+Moonlight talks to the PC over Wi-Fi as it always did. Away from home the
+same addresses go through the tunnel. Loopback, link-local, multicast and
+broadcast addresses never go through the tunnel either.
 
-- Files land in the **`Taildrop`** folder at the root of the SD card, and a
-  toast says so (with Ultrahand installed).
-- An existing file is never replaced: a second `photo.jpg` is saved as
-  `photo (1).jpg`.
-- A file is refused if it wouldn't leave 0.5% of the SD card free. The
-  sending device shows why.
-- While a file arrives it's called `<name>.partial`. If the transfer is
-  interrupted, that file is deleted.
-- **Files of 4 GB or more** on a FAT32 card are saved the way the Switch
-  stores large games: as a folder of parts that the Switch and homebrew read
-  as one file. On a computer it shows up as a folder. (A sender that doesn't
-  announce the size, such as `tailscale file cp -` from a pipe, stops at
-  4 GB on FAT32.)
-- **Only your own devices can send.** That's the same rule as Tailscale's own
-  apps. It doesn't work if the Switch was added with a **tagged** auth key,
-  because a tagged device doesn't belong to you. Sharing between users of a
-  tailnet isn't supported.
-- Taildrop has to be enabled for your tailnet. It is by default, on
-  Tailscale and on headscale.
-- Turn it off with `taildrop=off` in `config.ini`.
-
-## Subnet routes
-
-If a device in your tailnet is a
-[subnet router](https://tailscale.com/kb/1019/subnets), homebrew can reach
-the networks it shares, e.g. a PC at home at `192.168.1.20` that doesn't run
-Tailscale. This is on by default (`accept_routes=off` turns it off).
-
-- When the Switch is itself on a network that a route covers (at home, for
-  example), it reaches that network directly instead.
-- Exit nodes aren't supported: internet traffic never goes through
-  Tailscale.
-
-## Access rules
-
-wireguard-nx enforces your tailnet's
-[access rules](https://tailscale.com/kb/1018/acls) (ACLs) for connections
-coming in to the Switch, as every Tailscale device does. Something listening
-on the Switch, such as an FTP server, is reachable only from devices your
-rules allow. Connections the Switch makes are checked by the device they
-reach.
+Everything else in `AllowedIPs` goes through the tunnel, including a
+`0.0.0.0/0` default route (for homebrew only; the console's own traffic is
+never touched). Inbound connections work the same way: anything your peers
+may send reaches homebrew listening on the Switch (an FTP server, say), as
+with any WireGuard interface. There are no access rules beyond that.
 
 ## Settings (`config/wireguard-nx/config.ini`)
 
-All settings are optional. They take effect after a restart.
+All settings are optional. They take effect after a restart (the overlay's
+Config page switches `.conf` files at once).
 
 | Key | Default | What |
 |---|---|---|
-| `auth_key` | none | Auth key for joining without a link (see above) |
-| `hostname` | `nintendo-switch` | Device name in your tailnet |
-| `control_url` | `https://controlplane.tailscale.com` | Your headscale URL, if you use headscale |
-| `magicdns` | `on` | `off` stops writing tailnet names to the hosts file |
+| `conf` | the only `.conf` there is, else `wg0.conf` | Which `.conf` in `config/wireguard-nx` to use |
+| `hosts` | `on` | `off` stops writing peer names to the hosts file |
 | `connect_notice` | `on` | `off` turns off the "Connected" toast at boot (as does the overlay switch) |
-| `taildrop` | `on` | `off` stops receiving files with [Taildrop](#taildrop) |
-| `accept_routes` | `on` | `off` ignores your tailnet's [subnet routes](#subnet-routes) |
 | `update_check` | `on` | `off` stops checking GitHub for a newer release at boot (as does the overlay switch) |
-| `mitm` | `homebrew` | Which programs can reach the tailnet: `homebrew`, `off`, or `homebrew,sys-ftpd` (see below) |
+| `mitm` | `homebrew` | Which programs can reach the tunnel: `homebrew`, `off`, or `homebrew,sys-ftpd` (see below) |
 | `mitm_titles` | none | Title IDs of home-screen forwarders that aren't found automatically, up to 16 (see below) |
-| `overlay_budget_kb` | `320` | Memory for tailnet sockets, shared by all apps (128–384). Raise it only if apps report "no buffer space". |
-| `ca_cert` | none | Extra CA certificate (DER) for a self-signed headscale |
-| `log_udp` | none | Send the log to `ip:port` over UDP, e.g. to `nc -ul 5514` on a computer |
+| `overlay_budget_kb` | `320` | Memory for tunnel sockets, shared by all apps (128–384). Raise it only if apps report "no buffer space". |
+| `log_udp` | none | Send the log to `ip:port` over UDP (a tunnel address works from anywhere) |
 
 ### Home-screen forwarders
 
@@ -223,26 +182,26 @@ mitm_titles=0500000000001234, 05ABCDEF00000000
 
 The title ID is the one the forwarder was made with. The tool that made it
 shows it, and title managers such as DBI or Goldleaf list installed titles
-with their IDs; when a forwarder uses the tailnet, the log shows its ID
+with their IDs; when a forwarder uses the tunnel, the log shows its ID
 ("session from program ..."). List only forwarders, and restart after
 changing it. The log shows which IDs were accepted. `mitm=off` turns all of
 this off.
 
-### FTP over the tailnet (sys-ftpd)
+### FTP through the tunnel (sys-ftpd)
 
 With `mitm=homebrew,sys-ftpd`, the sys-ftpd sysmodule is also reachable on
-the Switch's tailnet address or name, e.g. `ftp://nintendo-switch:5000`.
-This costs about 70 KB more memory, and wireguard-nx restarts sys-ftpd once
-at boot to take it over. FTP on the local network keeps working as before.
+the Switch's tunnel address, e.g. `ftp://10.253.0.2:5000`. This costs about
+70 KB more memory, and wireguard-nx restarts sys-ftpd once at boot to take
+it over. FTP on the local network keeps working as before.
 
 sys-ftpd itself has two limits, with or without wireguard-nx:
-- **Speed:** about 11–14 Mbit/s on the local network and 5–7 Mbit/s over
-  the tailnet.
+- **Speed:** about 11–14 Mbit/s on the local network and less through the
+  tunnel.
 - **Back-to-back transfers:** after two large transfers in a row, it refuses
   connections for about 10 seconds while its sockets close.
 
 For big transfers, the ftpd homebrew app is much faster. It reaches the
-tailnet with the default `mitm=homebrew`.
+tunnel with the default `mitm=homebrew`.
 
 Serving sys-ftpd also uses extra system sessions, which every sysmodule
 shares. On consoles running many sysmodules, other homebrew (such as
@@ -253,8 +212,9 @@ to `mitm=homebrew`.
 
 wireguard-nx uses exactly **2.5 MB** of the memory the system sets aside for
 sysmodules, taken once when it starts. It never grows or shrinks: about
-1 MB of code and 1.5 MB of data, including a fixed heap of about 820 KB. Busy tailnet
-sockets use more of that heap, up to the `overlay_budget_kb` limit.
+0.8 MB of code and 1.7 MB of data, including a fixed heap of about 950 KB.
+Busy tunnel sockets use more of that heap, up to the `overlay_budget_kb`
+limit.
 
 - The overlay shows how much system memory is free with everything loaded.
   Keep some free: Nintendo starts some system modules only when they're
@@ -273,6 +233,24 @@ sockets use more of that heap, up to the `overlay_budget_kb` limit.
 
 ## Troubleshooting
 
+- **The overlay says "Config error".**
+  - It names the `.conf` and the line it couldn't read (a key that isn't
+    valid base64, a missing `PrivateKey` or `Address`, an unknown setting).
+    Fix the file and restart, or pick another file on the Config page.
+- **The overlay says "Connecting..." and "No handshake yet".**
+  - The server didn't answer. Check the `Endpoint` (host name or address,
+    and port), that the port is forwarded to the server if you're away from
+    home, that the server has the Switch's public key as a peer, and the
+    pre-shared key if there is one. **Connections** shows per peer whether
+    its endpoint is resolved and when it last answered.
+  - A console whose clock is badly wrong can't handshake either (WireGuard
+    checks timestamps). wireguard-nx corrects a wrong clock from the
+    network; if the log says it couldn't, set the clock.
+- **The overlay says "Idle".**
+  - It was connected, but no peer has answered for 3 minutes. Without
+    `PersistentKeepalive`, that's normal when nothing uses the tunnel; the
+    next connection handshakes again. If it stays like this while an app is
+    trying, the server has gone away.
 - **The overlay says the sysmodule isn't running.**
   - Check that `atmosphere/contents/4200000000005747/flags/boot2.flag`
     exists.
@@ -281,11 +259,12 @@ sockets use more of that heap, up to the `overlay_budget_kb` limit.
     sleeps the console never woke from. The file says which. **Turn back on**
     in the overlay deletes it and starts wireguard-nx again.
   - If `config/wireguard-nx/disabled` exists, delete it.
-- **The overlay says "Reconnecting..." or "No internet connection."**
-  - The Switch lost its internet connection, or can't reach Tailscale's
-    server. wireguard-nx keeps trying and reconnects on its own. On hotel or
-    café Wi-Fi, sign in to the network first. If it stays like this, the
-    overlay shows the last error.
+  - If tailscale-nx is also installed and running, only one of the two can
+    serve homebrew: turn the other off in Sysmodules.
+- **The overlay says "No internet connection."**
+  - The Switch lost its internet connection. wireguard-nx reconnects on its
+    own once it's back. On hotel or café Wi-Fi, sign in to the network
+    first.
 - **The overlay says "Not responding".**
   - wireguard-nx has stopped answering. Restart the console, and send us
     `sysmodule.log.1` (the boot before the restart).
@@ -294,15 +273,11 @@ sockets use more of that heap, up to the `overlay_budget_kb` limit.
     boot's log is in `sysmodule.log.1`.
   - To watch it live, set `log_udp` to a computer's address.
 - **An app reports "no buffer space" (errno 105).**
-  - All apps share the tailnet socket memory. Raise `overlay_budget_kb`.
-- **Moonlight is slow or choppy away from home.**
-  - Open the overlay's **Connections** page while streaming. If the PC shows
-    "via" a city, the stream is relayed. Some networks (hotel and mobile
-    ones especially) block direct connections; a direct path is often found
-    a few seconds after the stream starts.
+  - All apps share the tunnel socket memory. Raise `overlay_budget_kb`.
 - **Moonlight finds the PC at home but not away.**
-  - Check that Moonlight's saved host includes the tailnet name or `100.x`
-    address, and that the overlay shows **Connected**.
+  - Check that Moonlight's saved host includes the peer name or a tunnel
+    address, that `AllowedIPs` covers the PC's address, and that the overlay
+    shows **Connected**.
 
 Still stuck? Ask on [Discord](https://discord.gg/GjUuBEqRYb) or
 [open an issue](https://github.com/UnderwaterOverground/wireguard-nx/issues),
