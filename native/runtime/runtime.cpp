@@ -13,6 +13,7 @@
 #include <vector>
 
 #include "wgnx_app.h"
+#include "wgnx_update.h"
 #include "vsock.hpp"
 
 namespace wgnx {
@@ -57,7 +58,7 @@ bool MakeWakePair(int *rx, int *tx) {
 
 }  // namespace
 
-#ifndef WGNX_NO_STDIO  // reads state/root files with stdio; embedders without it use Adopt()
+#ifndef WGNX_NO_STDIO  // reads the conf with stdio; embedders without it use Adopt()
 std::unique_ptr<Runtime> Runtime::Start(RuntimeConfig cfg, std::string *error) {
     InternalScope internal;
     std::unique_ptr<Runtime> rt(new Runtime());
@@ -67,61 +68,38 @@ std::unique_ptr<Runtime> Runtime::Start(RuntimeConfig cfg, std::string *error) {
     uint8_t seed[32];
     wgnx_platform_random(seed, sizeof seed);
     wgnx_seed_rng(seed);
-    uint8_t machine[32], node[32], disco[32];
-    if (wgnx_state_load_or_create(c.state_path.c_str(), machine, node, disco) != 0) {
-        *error = "cannot read/write state " + c.state_path;
+    std::vector<uint8_t> conf = ReadFile(c.conf_path);
+    if (conf.empty()) {
+        *error = "cannot read " + c.conf_path;
         return nullptr;
     }
-    std::vector<uint8_t> root;
-    if (!c.extra_root_path.empty() && (root = ReadFile(c.extra_root_path)).empty()) {
-        *error = "cannot read " + c.extra_root_path;
-        return nullptr;
-    }
-    WgnxConfig ec{};
-    ec.control_url = c.control_url.c_str();
-    ec.auth_key = c.auth_key.empty() ? nullptr : c.auth_key.c_str();
-    ec.hostname = c.hostname.c_str();
-    ec.machine_key = machine;
-    ec.node_key = node;
-    ec.disco_key = disco;
-    ec.extra_root_der = root.empty() ? nullptr : root.data();
-    ec.extra_root_len = root.size();
     bool corrected = false;
-    uint64_t unix_time = wgnx_sane_unix_time(static_cast<uint64_t>(std::time(nullptr)), c.control_url.c_str(), &corrected);
+    uint64_t unix_time = wgnx_sane_unix_time(static_cast<uint64_t>(std::time(nullptr)), WGNX_UPDATE_HOST, &corrected);
     if (unix_time == 0) unix_time = static_cast<uint64_t>(std::time(nullptr));
-    rt->engine_ = wgnx_engine_new(&ec, wgnx_driver_now_ns(), unix_time);
-    if (!rt->engine_) {
-        *error = "wgnx_engine_new failed (bad control URL?)";
+    rt->engine_ = wgnx_engine_new(wgnx_driver_now_ns(), unix_time);
+    WgnxConfig wc{};
+    wc.conf = reinterpret_cast<const char *>(conf.data());
+    wc.conf_len = conf.size();
+    char err[160];
+    if (!wgnx_engine_reload(rt->engine_, &wc, wgnx_driver_now_ns(), err, sizeof err)) {
+        *error = c.conf_path + ": " + err;
         return nullptr;
     }
-    wgnx_engine_set_accept_routes(rt->engine_, c.accept_routes);
+    WgnxPrefix routes[VSock::MaxRoutes];
+    const size_t n = wgnx_engine_routes(rt->engine_, routes, VSock::MaxRoutes);
+    VSock::SetRoutes(routes, std::min(n, VSock::MaxRoutes));
     Runtime *self = rt.get();
     rt->driver_ = wgnx_driver_new(
         rt->engine_,
         [](void *ctx, const WgnxEvent *ev) {
             auto *r = static_cast<Runtime *>(ctx);
-            if (ev->kind == WGNX_EVENT_NODE_KEY) {
-                uint8_t node[32];
-                wgnx_engine_node_key(r->engine_, node);
-                wgnx_state_set_node(r->cfg_.state_path.c_str(), node);
-            }
-            if (ev->kind == WGNX_EVENT_PEERS && r->cfg_.accept_routes) {
-                WgnxPrefix routes[VSock::MaxRoutes];
-                const size_t n = wgnx_engine_routes(r->engine_, routes, VSock::MaxRoutes);
-                VSock::SetRoutes(routes, std::min(n, VSock::MaxRoutes));
-            }
             if (r->cfg_.on_event) r->cfg_.on_event(*ev);
         },
         self);
-    if (!c.connect_map.empty()) wgnx_driver_set_connect_map(rt->driver_, c.connect_map.c_str());
-    wgnx_driver_open_udp(rt->driver_, c.udp_port);  // failure: DERP only
-    if (!c.taildrop_dir.empty()) {
-        rt->drop_.reset(new WgnxDropDir());
-        WgnxDropSink sink = wgnx_drop_dir(rt->drop_.get(), &wgnx_posix_fs, c.taildrop_dir.c_str(), nullptr, nullptr);
-        if (wgnx_driver_set_taildrop(rt->driver_, &sink, c.taildrop_port) != 0) {
-            *error = "cannot listen for Taildrop on port " + std::to_string(c.taildrop_port);
-            return nullptr;
-        }
+    const uint16_t port = c.udp_port ? c.udp_port : wgnx_engine_listen_port(rt->engine_);
+    if (wgnx_driver_open_udp(rt->driver_, port) != 0 && wgnx_driver_open_udp(rt->driver_, 0) != 0) {
+        *error = "cannot open a UDP socket";
+        return nullptr;
     }
     if (!MakeWakePair(&rt->wake_rx_, &rt->wake_tx_)) {
         *error = "cannot create wake sockets";
@@ -264,6 +242,7 @@ void Runtime::Loop(const std::function<void(WgnxDriver *)> *on_tick, const std::
             if (on_resume_) on_resume_();
             MakeWakePair(&wake_rx_, &wake_tx_);
             wgnx_driver_resume(driver_);
+            wgnx_engine_network_up(engine_, wgnx_driver_now_ns());
             suspended_ = false;
             suspended_flag_ = false;
             cv_.notify_all();

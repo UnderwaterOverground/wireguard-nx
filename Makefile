@@ -15,19 +15,12 @@ else
   SW := docker run --rm -v "$(CURDIR)":/src -v wgnx-cargo-registry:/opt/cargo/registry -e CARGO_TARGET_DIR=/src/target/switch -w /src $(DOCKER_IMAGE)
 endif
 
-.PHONY: drop-test publish release overlay mitm-test nxlink-mitm-test speedtest nxlink-speedtest all host-test host-c e2e sysmodule libstratosphere docker-image rust-switch nro nxlink clean
+.PHONY: publish release overlay mitm-test nxlink-mitm-test speedtest nxlink-speedtest all host-test host-c e2e sysmodule libstratosphere docker-image rust-switch nro nxlink clean
 
 all: host-test nro
 
-host-test: drop-test
+host-test:
 	cargo test --workspace
-
-# Taildrop's file saving (native/driver/wgnx_drop.c) on a temporary folder.
-drop-test:
-	@mkdir -p target
-	$(CC) -Wall -Wextra -O1 -g -fsanitize=address,undefined -Icrates/wgnx-ffi/include -Inative/driver \
-		-o target/drop-test native/host/drop_test.c native/driver/wgnx_drop.c
-	target/drop-test
 
 # Local tailnet end-to-end tests (headscale + stock tailscaled in Docker).
 e2e:
@@ -35,7 +28,7 @@ e2e:
 	e2e/run-tests.sh
 
 # Host build of the C driver + FFI (the Switch app's code paths, on the Mac).
-HOST_C_SRCS := native/host/main.c native/driver/wgnx_driver.c native/driver/wgnx_app.c native/driver/wgnx_dns.c native/driver/wgnx_drop.c \
+HOST_C_SRCS := native/host/main.c native/driver/wgnx_driver.c native/driver/wgnx_app.c native/driver/wgnx_dns.c \
 	native/driver/wgnx_update.c
 host-c: target/wgnx-c
 
@@ -131,7 +124,7 @@ clean:
 # Interpose shim (run unmodified programs through the socket virtualization
 # layer) and its test client, for macOS.
 VSOCK_SRCS := native/vsock/vsock.cpp native/runtime/runtime.cpp native/interpose/interpose.cpp
-VSOCK_C_SRCS := native/driver/wgnx_driver.c native/driver/wgnx_app.c native/driver/wgnx_drop.c
+VSOCK_C_SRCS := native/driver/wgnx_driver.c native/driver/wgnx_app.c native/driver/wgnx_update.c
 VSOCK_INC := -Icrates/wgnx-ffi/include -Inative/driver -Inative/runtime -Inative/vsock
 .PHONY: interpose
 interpose: target/libwgnx_interpose.dylib target/vsock-test
@@ -141,8 +134,8 @@ target/libwgnx_interpose.dylib: $(VSOCK_SRCS) $(VSOCK_C_SRCS) native/*/*.h* FORC
 	$(CC) -c -O1 -g -Wall $(VSOCK_INC) native/driver/wgnx_driver.c -o target/wgnx_driver.o
 	$(CC) -c -O1 -g -Wall -DWGNX_BUILD_UNIX=$(BUILD_UNIX) $(VSOCK_INC) native/driver/wgnx_app.c -o target/wgnx_app.o
 	$(CC) -c -O1 -g -Wall $(VSOCK_INC) native/driver/wgnx_dns.c -o target/wgnx_dns.o
-	$(CC) -c -O1 -g -Wall $(VSOCK_INC) native/driver/wgnx_drop.c -o target/wgnx_drop.o
-	$(CXX) -std=c++17 -O1 -g -Wall -dynamiclib -o $@ $(VSOCK_INC) $(VSOCK_SRCS) target/wgnx_driver.o target/wgnx_app.o target/wgnx_dns.o target/wgnx_drop.o \
+	$(CC) -c -O1 -g -Wall $(VSOCK_INC) native/driver/wgnx_update.c -o target/wgnx_update.o
+	$(CXX) -std=c++17 -O1 -g -Wall -dynamiclib -o $@ $(VSOCK_INC) $(VSOCK_SRCS) target/wgnx_driver.o target/wgnx_app.o target/wgnx_dns.o target/wgnx_update.o \
 		target/debug/libwgnx_ffi.a -framework CoreFoundation -framework Security
 
 # The socket layer's subnet-route check (macOS; links the interpose shim).

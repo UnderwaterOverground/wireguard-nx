@@ -92,6 +92,7 @@ WgnxPrefix g_routes[VSock::MaxRoutes];
 size_t g_num_routes = 0;
 uint32_t g_local_ipv4 = 0;
 unsigned g_local_len = 32;
+bool g_tunnel_lan = false;
 
 // Whether the first `len` bits of a and b match.
 bool PrefixMatch(const uint8_t *a, const uint8_t *b, unsigned len) {
@@ -116,33 +117,42 @@ void VSock::SetLocalNet(uint32_t ip, unsigned len) {
     g_local_len = std::min(len, 32u);
 }
 
-bool VSock::IsTailnet(const sockaddr *addr) {
+void VSock::SetTunnelLan(bool on) {
+    std::lock_guard<std::mutex> lock(g_routes_mu);
+    g_tunnel_lan = on;
+}
+
+bool VSock::IsTunnel(const sockaddr *addr) {
     if (!addr) return false;
     uint8_t ip[16];
     int family;
     if (addr->sa_family == AF_INET) {
         const uint32_t v4 = ntohl(reinterpret_cast<const sockaddr_in *>(addr)->sin_addr.s_addr);
-        if ((v4 & 0xffc00000u) == 0x64400000u) return true;  // 100.64.0.0/10
+        // Never the tunnel: unspecified, loopback, link-local, multicast, broadcast.
+        if (v4 == 0 || (v4 >> 24) == 127 || (v4 & 0xffff0000u) == 0xa9fe0000u || (v4 >> 28) == 0xe || v4 == 0xffffffffu)
+            return false;
         std::memcpy(ip, &reinterpret_cast<const sockaddr_in *>(addr)->sin_addr, 4);
         family = 4;
     } else if (addr->sa_family == AF_INET6) {
-        static const uint8_t prefix[6] = {0xfd, 0x7a, 0x11, 0x5c, 0xa1, 0xe0};  // fd7a:115c:a1e0::/48
         std::memcpy(ip, &reinterpret_cast<const sockaddr_in6 *>(addr)->sin6_addr, 16);
-        if (std::memcmp(ip, prefix, 6) == 0) return true;
+        static const uint8_t loopback[16] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1};
+        static const uint8_t zero[16] = {0};
+        if (std::memcmp(ip, loopback, 16) == 0 || std::memcmp(ip, zero, 16) == 0) return false;
+        if (ip[0] == 0xff || (ip[0] == 0xfe && (ip[1] & 0xc0) == 0x80)) return false;  // multicast, link-local
         family = 6;
     } else {
         return false;
     }
     std::lock_guard<std::mutex> lock(g_routes_mu);
-    uint8_t local[4];
-    const uint32_t local_be = htonl(g_local_ipv4);
-    std::memcpy(local, &local_be, 4);
+    if (family == 4 && g_local_ipv4 && !g_tunnel_lan) {
+        uint8_t local[4];
+        const uint32_t local_be = htonl(g_local_ipv4);
+        std::memcpy(local, &local_be, 4);
+        if (PrefixMatch(ip, local, g_local_len)) return false;  // on our LAN: direct
+    }
     for (size_t i = 0; i < g_num_routes; i++) {
         const WgnxPrefix &r = g_routes[i];
-        if (r.family != family || r.len > (family == 4 ? 32 : 128) || !PrefixMatch(ip, r.ip, r.len)) continue;
-        // Overlapping networks share their first min(len) bits.
-        if (family == 4 && g_local_ipv4 && PrefixMatch(local, r.ip, std::min<unsigned>(r.len, g_local_len))) continue;
-        return true;
+        if (r.family == family && r.len <= (family == 4 ? 32 : 128) && PrefixMatch(ip, r.ip, r.len)) return true;
     }
     return false;
 }
@@ -281,7 +291,7 @@ Result VSock::Close(int fd) {
 
 Result VSock::Connect(int fd, const sockaddr *addr, socklen_t len) {
     VFd v;
-    if (!Get(fd, &v) || !IsTailnet(addr)) {
+    if (!Get(fd, &v) || !IsTunnel(addr)) {
         if (Get(fd, &v)) {
             v.real_used = true;
             Put(fd, v);
@@ -322,8 +332,8 @@ Result VSock::Connect(int fd, const sockaddr *addr, socklen_t len) {
 Result VSock::Bind(int fd, const sockaddr *addr, socklen_t len) {
     VFd v;
     if (!Get(fd, &v)) return real_.Bind(fd, addr, len);
-    if (IsTailnet(addr)) {
-        // Binding to our tailnet address: the real stack doesn't have it.
+    if (IsTunnel(addr)) {
+        // Binding to our tunnel address: the real stack doesn't have it.
         v.port = PortOf(addr);
         v.virtual_only = true;
         // Give back socket memory the app reserved for the real side (e.g.
@@ -360,7 +370,7 @@ Result VSock::Bind(int fd, const sockaddr *addr, socklen_t len) {
             return r;
         }
     }
-    // Wildcard- or tailnet-bound datagram sockets receive tailnet traffic too.
+    // Wildcard- or tunnel-bound datagram sockets receive tunnel traffic too.
     if (v.type == SOCK_DGRAM && (eager_dual_udp_ || v.virtual_only) && !EnsureUdp(fd, v)) return Fail(Err::AddrInUse);
     Put(fd, v);
     return Result::Ok(0);
@@ -446,7 +456,7 @@ Result VSock::SendTo(int fd, const void *buf, size_t len, int flags, const socka
     }
     WgnxAddr dst;
     if (to) {
-        if (!IsTailnet(to)) {
+        if (!IsTunnel(to)) {
             v.real_used = true;
             Put(fd, v);
             return real_.SendTo(fd, buf, len, flags, to, tolen);
@@ -614,7 +624,7 @@ Result VSock::Shutdown(int fd, int how) {
 Result VSock::GetSockName(int fd, sockaddr *addr, socklen_t *len) {
     VFd v;
     if (!Get(fd, &v) || !(v.tcp || v.virtual_only)) return real_.GetSockName(fd, addr, len);
-    // The overlay side: our tailnet address and the overlay port.
+    // The overlay side: our tunnel address and the overlay port.
     int32_t id = v.tcp ? v.tcp : (v.udp ? v.udp : v.listen);
     WgnxAddr a{};
     if (rt_.With([&](WgnxEngine *e) { return wgnx_net_local_addr(e, id, &a); }) != 0) return Fail(Err::Inval);
@@ -672,7 +682,7 @@ Result VSock::SetSockOpt(int fd, int level, int name, const void *val, socklen_t
         else v.snd_timeout_ms = ms > 0 ? ms : -1;
         Put(fd, v);
     }
-    // A tailnet-only socket's real side is just a placeholder for its fd
+    // A tunnel-only socket's real side is just a placeholder for its fd
     // number: buffer sizes there would only reserve the app's socket memory
     // (sys-ftpd's pool is small enough that this made its accepts fail).
     if (Get(fd, &v) && v.virtual_only && level == SOL_SOCKET && (name == SO_SNDBUF || name == SO_RCVBUF))

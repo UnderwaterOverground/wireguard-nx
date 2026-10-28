@@ -560,8 +560,8 @@ namespace ams::bsd_mitm {
 
             Result SendTo(sf::Out<s32> out_ret, sf::Out<s32> out_errno, s32 fd, s32 flags, const sf::InAutoSelectBuffer &buf, const sf::InAutoSelectBuffer &addr) {
                 const sockaddr *to = AddrIn(addr);
-                R_UNLESS(Virtual(fd) || (Known(fd) && ::wgnx::VSock::IsTailnet(to)), sm::mitm::ResultShouldForwardToSession());
-                if (status::IsPaused() && (to == nullptr || ::wgnx::VSock::IsTailnet(to))) R_RETURN(Reply(out_ret, out_errno, VResult{-1, WireENetUnreach}));
+                R_UNLESS(Virtual(fd) || (Known(fd) && ::wgnx::VSock::IsTunnel(to)), sm::mitm::ResultShouldForwardToSession());
+                if (status::IsPaused() && (to == nullptr || ::wgnx::VSock::IsTunnel(to))) R_RETURN(Reply(out_ret, out_errno, VResult{-1, WireENetUnreach}));
                 R_RETURN(Reply(out_ret, out_errno, V()->SendTo(fd, buf.GetPointer(), buf.GetSize(), flags, to, to ? static_cast<socklen_t>(addr.GetSize()) : 0)));
             }
 
@@ -572,7 +572,7 @@ namespace ams::bsd_mitm {
                 const VResult r = V()->Accept(fd, sa, sa ? std::addressof(len) : nullptr);
                 out_len.SetValue(r.ret >= 0 && sa ? len : 0);
                 // Dual listeners also accept plain LAN connections here.
-                if (r.ret >= 0 && sa && ::wgnx::VSock::IsTailnet(sa)) {
+                if (r.ret >= 0 && sa && ::wgnx::VSock::IsTunnel(sa)) {
                     char peer[64];
                     FormatAddr(sa, peer, sizeof peer);
                     Log("bsd mitm: pid %lu accepted tailnet connection from %s on fd %d (new fd %d; %zu sockets tracked)", m_client_info.process_id.value, peer, fd,
@@ -589,7 +589,7 @@ namespace ams::bsd_mitm {
 
             Result Connect(sf::Out<s32> out_ret, sf::Out<s32> out_errno, s32 fd, const sf::InAutoSelectBuffer &addr) {
                 const sockaddr *sa = AddrIn(addr);
-                const bool tailnet = ::wgnx::VSock::IsTailnet(sa);
+                const bool tailnet = ::wgnx::VSock::IsTunnel(sa);
                 R_UNLESS(Known(fd) && sa != nullptr && (tailnet || Virtual(fd)), sm::mitm::ResultShouldForwardToSession());
                 if (tailnet && status::IsPaused()) R_RETURN(Reply(out_ret, out_errno, VResult{-1, WireENetUnreach}));
                 const VResult r = V()->Connect(fd, sa, static_cast<socklen_t>(addr.GetSize()));
@@ -676,8 +676,8 @@ namespace ams::bsd_mitm {
                     if (sa->sa_family == AF_INET6 && m.name_len >= sizeof(sockaddr_in6)) return sa;
                     return nullptr;
                 };
-                R_UNLESS(Virtual(fd) || ::wgnx::VSock::IsTailnet(dest(msgs[0])), sm::mitm::ResultShouldForwardToSession());
-                if (status::IsPaused() && (dest(msgs[0]) == nullptr || ::wgnx::VSock::IsTailnet(dest(msgs[0])))) R_RETURN(Reply(out_ret, out_errno, VResult{-1, WireENetUnreach}));
+                R_UNLESS(Virtual(fd) || ::wgnx::VSock::IsTunnel(dest(msgs[0])), sm::mitm::ResultShouldForwardToSession());
+                if (status::IsPaused() && (dest(msgs[0]) == nullptr || ::wgnx::VSock::IsTunnel(dest(msgs[0])))) R_RETURN(Reply(out_ret, out_errno, VResult{-1, WireENetUnreach}));
 
                 s32 sent = 0;
                 VResult last = VResult::Ok(0);

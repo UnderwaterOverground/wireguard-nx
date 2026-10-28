@@ -20,18 +20,20 @@ static bool WaitSuspended(Runtime &rt, bool want) {
 }
 
 int main() {
-    uint8_t seed[32], machine[32], node[32], disco[32];
-    for (uint8_t *k : {seed, machine, node, disco}) wgnx_platform_random(k, 32);
+    uint8_t seed[32];
+    wgnx_platform_random(seed, 32);
     wgnx_seed_rng(seed);
-    // Nothing listens there: the engine just keeps retrying.
-    WgnxConfig cfg = {};
-    cfg.control_url = "https://127.0.0.1:9";
-    cfg.hostname = "runtime-test";
-    cfg.machine_key = machine;
-    cfg.node_key = node;
-    cfg.disco_key = disco;
-    WgnxEngine *engine = wgnx_engine_new(&cfg, wgnx_driver_now_ns(), static_cast<uint64_t>(time(nullptr)));
+    // A peer nobody answers at: the engine just keeps trying to handshake.
+    static const char kConf[] =
+        "[Interface]\nPrivateKey = yAnz5TF+lXXJte14tji3zlMNq+hd2rYUIgJBgB3fBmk=\nAddress = 10.7.0.2/32\n"
+        "[Peer]\nPublicKey = xTIBA5rboUvnH4htodjb6e697QjLERt1NAB4mZqp8Dg=\nAllowedIPs = 10.7.0.1/32\n"
+        "Endpoint = 127.0.0.1:9\nPersistentKeepalive = 1\n";
+    WgnxEngine *engine = wgnx_engine_new(wgnx_driver_now_ns(), static_cast<uint64_t>(time(nullptr)));
+    WgnxConfig cfg{kConf, sizeof kConf - 1};
+    char err[128];
+    assert(wgnx_engine_reload(engine, &cfg, wgnx_driver_now_ns(), err, sizeof err));
     WgnxDriver *driver = wgnx_driver_new(engine, nullptr, nullptr);
+    assert(wgnx_driver_open_udp(driver, 0) == 0);
     std::string error;
     auto rt = Runtime::Adopt(engine, driver, &error);
     assert(rt);
@@ -59,6 +61,7 @@ int main() {
     assert(rt->IsSuspended());
     rt->Resume(Runtime::kSleep);
     assert(WaitSuspended(*rt, false));
+    assert(wgnx_driver_udp_port(driver) != 0);  // reopened on resume
 
     rt->Stop();
     loop.join();

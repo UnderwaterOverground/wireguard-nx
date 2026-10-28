@@ -1,69 +1,52 @@
-//! The engine over the C ABI. The C driver owns sockets and the clock; see
-//! `include/wgnx.h` for the contract.
+//! The engine over the C ABI. The C driver owns the UDP socket and the
+//! clock; see `include/wgnx.h` for the contract.
 
 use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec::Vec;
-use core::ffi::{c_char, CStr};
+use core::ffi::c_char;
 use core::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use core::time::Duration;
 
-use wgnx_core::control::client::ControlConfig;
-use wgnx_core::engine::{Engine, EngineConfig, Event, Io};
+use wgnx_core::engine::{Engine, Event, Io, Prefix};
 use wgnx_core::netstack::NetError;
 use wgnx_core::time::Instant;
 
 #[repr(C)]
 pub struct WgnxConfig {
-    pub control_url: *const c_char,
-    /// May be NULL.
-    pub auth_key: *const c_char,
-    pub hostname: *const c_char,
-    pub machine_key: *const u8,
-    pub node_key: *const u8,
-    /// Persisted disco private key (32 bytes); NULL = generate per run.
-    pub disco_key: *const u8,
-    /// Optional extra trusted root certificate (DER), for dev servers.
-    pub extra_root_der: *const u8,
-    pub extra_root_len: usize,
+    /// The .conf text (UTF-8, need not be NUL-terminated).
+    pub conf: *const c_char,
+    pub conf_len: usize,
 }
 
-pub const WGNX_IO_CONNECT: u32 = 1;
-pub const WGNX_IO_SEND: u32 = 2;
-pub const WGNX_IO_CLOSE: u32 = 3;
-pub const WGNX_IO_SEND_UDP: u32 = 4;
+pub const WGNX_IO_SEND_UDP: u32 = 1;
 
 #[repr(C)]
 pub struct WgnxIo {
     pub kind: u32,
-    pub id: u32,
-    /// NUL-terminated host name or IP literal (CONNECT).
-    pub host: *const c_char,
-    pub port: u16,
-    /// Bytes to send (SEND, SEND_UDP). Valid until the next `wgnx_engine_poll_io`.
+    pub reserved: u32,
+    /// Bytes to send. Valid until the next `wgnx_engine_poll_io`.
     pub data: *const u8,
     pub len: usize,
-    /// Destination (SEND_UDP).
     pub addr: WgnxAddr,
 }
 
 pub const WGNX_EVENT_LOG: u32 = 0;
-pub const WGNX_EVENT_LOGIN_URL: u32 = 1;
-pub const WGNX_EVENT_AUTHORIZED: u32 = 2;
-pub const WGNX_EVENT_ADDRESSES: u32 = 3;
-pub const WGNX_EVENT_PEERS: u32 = 4;
-pub const WGNX_EVENT_HOME_DERP: u32 = 5;
-pub const WGNX_EVENT_ERROR: u32 = 6;
-pub const WGNX_EVENT_ENDPOINTS: u32 = 7;
-pub const WGNX_EVENT_PEER_PATH: u32 = 8;
-pub const WGNX_EVENT_NODE_KEY: u32 = 9;
-pub const WGNX_EVENT_CONTROL: u32 = 10;
+pub const WGNX_EVENT_ADDRESSES: u32 = 1;
+pub const WGNX_EVENT_PEERS: u32 = 2;
+pub const WGNX_EVENT_ERROR: u32 = 3;
+pub const WGNX_EVENT_RESOLVE: u32 = 4;
+pub const WGNX_EVENT_HANDSHAKE: u32 = 5;
+pub const WGNX_EVENT_PEER_LOST: u32 = 6;
 
 #[repr(C)]
 pub struct WgnxEvent {
     pub kind: u32,
-    /// Numeric detail (peer count, DERP region).
+    /// Peer index or count.
     pub value: u32,
+    /// RESOLVE: the port to use with the resolved address.
+    pub port: u16,
+    pub reserved: u16,
     /// NUL-terminated text. Valid until the next `wgnx_engine_poll_event`.
     pub text: *const c_char,
 }
@@ -78,70 +61,92 @@ pub struct WgnxAddr {
     pub port: u16,
 }
 
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct WgnxPrefix {
+    /// 4 or 6.
+    pub family: u8,
+    pub len: u8,
+    /// IPv4 uses the first 4 bytes.
+    pub ip: [u8; 16],
+    pub reserved: [u8; 6],
+}
+
+pub const WGNX_PEER_SESSION: u32 = 1;
+pub const WGNX_PEER_ENDPOINT_NAME: u32 = 2;
+pub const WGNX_PEER_RESOLVING: u32 = 4;
+pub const WGNX_PEER_ROAMED: u32 = 8;
+pub const WGNX_PEER_KEEPALIVE: u32 = 16;
+pub const WGNX_PEER_PSK: u32 = 32;
+pub const WGNX_PEER_DEFAULT_ROUTE: u32 = 64;
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct WgnxPeerInfo {
+    pub name: [c_char; 32],
+    pub ipv4: [u8; 4],
+    pub endpoint_ip: [u8; 4],
+    pub endpoint_port: u16,
+    pub keepalive_s: u16,
+    pub last_handshake_s: u32,
+    pub last_rx_s: u32,
+    pub flags: u32,
+    pub rx_bytes: u64,
+    pub tx_bytes: u64,
+    pub allowed_ips: u32,
+    pub reserved: u32,
+}
+
+const _: () = assert!(core::mem::size_of::<WgnxPeerInfo>() == 80);
+const _: () = assert!(core::mem::size_of::<WgnxPrefix>() == 24);
+
 pub struct WgnxEngine {
     engine: Engine,
     now: Instant,
-    io_host: Vec<u8>,
     io_data: Vec<u8>,
     event_text: Vec<u8>,
-    drop_name: Vec<u8>,
-    drop_text: Vec<u8>,
 }
 
-unsafe fn cstr<'a>(p: *const c_char) -> Option<&'a str> {
-    if p.is_null() {
-        None
-    } else {
-        CStr::from_ptr(p).to_str().ok()
-    }
-}
-
-/// Creates an engine. Keys are 32-byte private keys. Returns NULL on bad
-/// arguments (e.g. RNG not seeded, invalid URL).
+/// Creates an engine with no configuration (see `wgnx_engine_reload`).
 #[no_mangle]
-pub unsafe extern "C" fn wgnx_engine_new(cfg: *const WgnxConfig, now_ns: u64, unix_secs: u64) -> *mut WgnxEngine {
-    let cfg = &*cfg;
-    let (Some(url), Some(hostname)) = (cstr(cfg.control_url), cstr(cfg.hostname)) else {
-        return core::ptr::null_mut();
-    };
-    if cfg.machine_key.is_null() || cfg.node_key.is_null() {
-        return core::ptr::null_mut();
-    }
-    let extra_roots = if cfg.extra_root_der.is_null() || cfg.extra_root_len == 0 {
-        Vec::new()
-    } else {
-        alloc::vec![core::slice::from_raw_parts(cfg.extra_root_der, cfg.extra_root_len).to_vec()]
-    };
-    let config = EngineConfig {
-        control: ControlConfig {
-            url: url.into(),
-            auth_key: cstr(cfg.auth_key).filter(|k| !k.is_empty()).map(String::from),
-            hostname: hostname.into(),
-            extra_roots,
-        },
-        machine_private: *(cfg.machine_key as *const [u8; 32]),
-        node_private: *(cfg.node_key as *const [u8; 32]),
-        disco_private: if cfg.disco_key.is_null() {
-            match wgnx_core::rng::bytes32() {
-                Ok(k) => k,
-                Err(_) => return core::ptr::null_mut(),
-            }
-        } else {
-            *(cfg.disco_key as *const [u8; 32])
-        },
-    };
+pub unsafe extern "C" fn wgnx_engine_new(now_ns: u64, unix_secs: u64) -> *mut WgnxEngine {
     let now = Instant::from_nanos(now_ns);
-    match Engine::new(config, now, Duration::from_secs(unix_secs)) {
-        Ok(engine) => Box::into_raw(Box::new(WgnxEngine {
-            engine,
-            now,
-            io_host: Vec::new(),
-            io_data: Vec::new(),
-            event_text: Vec::new(),
-            drop_name: Vec::new(),
-            drop_text: Vec::new(),
-        })),
-        Err(_) => core::ptr::null_mut(),
+    Box::into_raw(Box::new(WgnxEngine { engine: Engine::new(now, Duration::from_secs(unix_secs)), now, io_data: Vec::new(), event_text: Vec::new() }))
+}
+
+/// Parses `cfg->conf` and applies it. On failure nothing changes and the
+/// reason ("line 12: PublicKey: not valid base64") is written to
+/// `err[err_cap]` (NUL-terminated; may be NULL/0).
+#[no_mangle]
+pub unsafe extern "C" fn wgnx_engine_reload(e: *mut WgnxEngine, cfg: *const WgnxConfig, now_ns: u64, err: *mut c_char, err_cap: usize) -> bool {
+    let e = &mut *e;
+    e.now = Instant::from_nanos(now_ns);
+    let write_err = |msg: &str| {
+        if !err.is_null() && err_cap > 0 {
+            let n = msg.len().min(err_cap - 1);
+            core::ptr::copy_nonoverlapping(msg.as_ptr(), err.cast::<u8>(), n);
+            *err.add(n) = 0;
+        }
+    };
+    let cfg = &*cfg;
+    if cfg.conf.is_null() {
+        write_err("no configuration");
+        return false;
+    }
+    let text = core::slice::from_raw_parts(cfg.conf.cast::<u8>(), cfg.conf_len);
+    let Ok(text) = core::str::from_utf8(text) else {
+        write_err("the file is not UTF-8 text");
+        return false;
+    };
+    match wgnx_core::config::parse(text) {
+        Ok(parsed) => {
+            e.engine.reload(parsed, e.now);
+            true
+        }
+        Err(pe) => {
+            write_err(&alloc::format!("{pe}"));
+            false
+        }
     }
 }
 
@@ -156,45 +161,9 @@ pub unsafe extern "C" fn wgnx_engine_free(e: *mut WgnxEngine) {
 #[no_mangle]
 pub unsafe extern "C" fn wgnx_engine_poll_io(e: *mut WgnxEngine, out: *mut WgnxIo) -> bool {
     let e = &mut *e;
-    let Some(io) = e.engine.poll_io() else { return false };
-    let out = &mut *out;
-    *out = WgnxIo {
-        kind: 0,
-        id: 0,
-        host: c"".as_ptr(),
-        port: 0,
-        data: core::ptr::null(),
-        len: 0,
-        addr: WgnxAddr { family: 0, ip: [0; 16], port: 0 },
-    };
-    match io {
-        Io::Connect { id, host, port } => {
-            e.io_host = host.into_bytes();
-            e.io_host.push(0);
-            out.kind = WGNX_IO_CONNECT;
-            out.id = id;
-            out.host = e.io_host.as_ptr().cast();
-            out.port = port;
-        }
-        Io::Send { id, data } => {
-            e.io_data = data;
-            out.kind = WGNX_IO_SEND;
-            out.id = id;
-            out.data = e.io_data.as_ptr();
-            out.len = e.io_data.len();
-        }
-        Io::Close { id } => {
-            out.kind = WGNX_IO_CLOSE;
-            out.id = id;
-        }
-        Io::SendUdp { dst, data } => {
-            e.io_data = data;
-            out.kind = WGNX_IO_SEND_UDP;
-            out.data = e.io_data.as_ptr();
-            out.len = e.io_data.len();
-            out.addr = from_sockaddr(dst);
-        }
-    }
+    let Some(Io::SendUdp { dst, data }) = e.engine.poll_io() else { return false };
+    e.io_data = data;
+    *out = WgnxIo { kind: WGNX_IO_SEND_UDP, reserved: 0, data: e.io_data.as_ptr(), len: e.io_data.len(), addr: from_sockaddr(dst) };
     true
 }
 
@@ -208,67 +177,36 @@ pub unsafe extern "C" fn wgnx_engine_udp(e: *mut WgnxEngine, src: *const WgnxAdd
     }
 }
 
-/// Sets the local UDP endpoints (interface IP + bound port) to advertise.
-#[no_mangle]
-pub unsafe extern "C" fn wgnx_engine_set_local_endpoints(e: *mut WgnxEngine, eps: *const WgnxAddr, n: usize, now_ns: u64) {
-    let e = &mut *e;
-    e.now = Instant::from_nanos(now_ns);
-    let list: Vec<SocketAddr> = (0..n).filter_map(|i| to_sockaddr(&*eps.add(i))).collect();
-    e.engine.set_local_endpoints(&list, e.now);
-}
-
 /// Takes the next status event. Returns false when there is none.
 #[no_mangle]
 pub unsafe extern "C" fn wgnx_engine_poll_event(e: *mut WgnxEngine, out: *mut WgnxEvent) -> bool {
     let e = &mut *e;
     let Some(ev) = e.engine.poll_event() else { return false };
+    let mut port = 0;
     let (kind, value, text) = match ev {
-        Event::LoginUrl(u) => (WGNX_EVENT_LOGIN_URL, 0, u),
-        Event::Authorized => (WGNX_EVENT_AUTHORIZED, 0, String::new()),
         Event::Addresses(a) => {
-            let text = a.iter().map(|ip| alloc::format!("{ip}")).collect::<Vec<_>>().join(" ");
+            let text = a.iter().map(|p| alloc::format!("{}/{}", p.addr, p.len)).collect::<Vec<_>>().join(" ");
             (WGNX_EVENT_ADDRESSES, a.len() as u32, text)
         }
         Event::Peers(n) => (WGNX_EVENT_PEERS, n as u32, String::new()),
-        Event::HomeDerp(r) => (WGNX_EVENT_HOME_DERP, r, String::new()),
         Event::Error(s) => (WGNX_EVENT_ERROR, 0, s),
-        Event::Endpoints(eps) => {
-            let text = eps.iter().map(|e| alloc::format!("{e}")).collect::<Vec<_>>().join(" ");
-            (WGNX_EVENT_ENDPOINTS, eps.len() as u32, text)
-        }
-        Event::PeerPath { peer, direct } => match direct {
-            Some(addr) => (WGNX_EVENT_PEER_PATH, 1, alloc::format!("{peer} direct {addr}")),
-            None => (WGNX_EVENT_PEER_PATH, 0, alloc::format!("{peer} via DERP")),
-        },
         Event::Log(s) => (WGNX_EVENT_LOG, 0, s),
-        Event::NodeKeyChanged => (WGNX_EVENT_NODE_KEY, 0, String::new()),
-        Event::Control(up) => (WGNX_EVENT_CONTROL, up as u32, String::new()),
+        Event::Resolve { peer, host, port: p } => {
+            port = p;
+            (WGNX_EVENT_RESOLVE, peer as u32, host)
+        }
+        Event::Handshake { peer } => (WGNX_EVENT_HANDSHAKE, peer as u32, peer_name(&e.engine, peer)),
+        Event::PeerLost { peer } => (WGNX_EVENT_PEER_LOST, peer as u32, peer_name(&e.engine, peer)),
     };
     e.event_text = text.into_bytes();
+    e.event_text.retain(|&b| b != 0);
     e.event_text.push(0);
-    *out = WgnxEvent { kind, value, text: e.event_text.as_ptr().cast() };
+    *out = WgnxEvent { kind, value, port, reserved: 0, text: e.event_text.as_ptr().cast() };
     true
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn wgnx_engine_connected(e: *mut WgnxEngine, id: u32, now_ns: u64) {
-    let e = &mut *e;
-    e.now = Instant::from_nanos(now_ns);
-    e.engine.handle_connected(id, e.now);
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn wgnx_engine_data(e: *mut WgnxEngine, id: u32, data: *const u8, len: usize, now_ns: u64) {
-    let e = &mut *e;
-    e.now = Instant::from_nanos(now_ns);
-    e.engine.handle_data(id, core::slice::from_raw_parts(data, len), e.now);
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn wgnx_engine_closed(e: *mut WgnxEngine, id: u32, now_ns: u64) {
-    let e = &mut *e;
-    e.now = Instant::from_nanos(now_ns);
-    e.engine.handle_closed(id, e.now);
+fn peer_name(engine: &Engine, peer: usize) -> String {
+    engine.peers_info().get(peer).map(|p| p.name.clone()).unwrap_or_default()
 }
 
 /// Runs timers. Call when `wgnx_engine_next_deadline` has passed (calling it
@@ -280,9 +218,8 @@ pub unsafe extern "C" fn wgnx_engine_timeout(e: *mut WgnxEngine, now_ns: u64) {
     e.engine.handle_timeout(e.now);
 }
 
-/// The network came back (offline -> online, e.g. Wi-Fi after a wake):
-/// control and DERP retry now instead of waiting out their backoff. Leaves
-/// connections that are up alone.
+/// The network came back or changed: host names are resolved again and
+/// every reachable peer is contacted now.
 #[no_mangle]
 pub unsafe extern "C" fn wgnx_engine_network_up(e: *mut WgnxEngine, now_ns: u64) {
     let e = &mut *e;
@@ -290,10 +227,122 @@ pub unsafe extern "C" fn wgnx_engine_network_up(e: *mut WgnxEngine, now_ns: u64)
     e.engine.network_up(e.now);
 }
 
+/// Answers WGNX_EVENT_RESOLVE (or overrides a peer's endpoint).
+#[no_mangle]
+pub unsafe extern "C" fn wgnx_engine_set_peer_endpoint(e: *mut WgnxEngine, peer: u32, addr: *const WgnxAddr, now_ns: u64) {
+    let e = &mut *e;
+    e.now = Instant::from_nanos(now_ns);
+    if let Some(a) = to_sockaddr(&*addr) {
+        e.engine.set_peer_endpoint(peer as usize, a, e.now);
+    }
+}
+
 /// Monotonic time (ns) by which `wgnx_engine_timeout` should be called.
 #[no_mangle]
 pub unsafe extern "C" fn wgnx_engine_next_deadline(e: *mut WgnxEngine) -> u64 {
     (*e).engine.next_deadline().as_nanos()
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn wgnx_engine_listen_port(e: *mut WgnxEngine) -> u16 {
+    (*e).engine.listen_port().unwrap_or(0)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn wgnx_engine_mtu(e: *mut WgnxEngine) -> u16 {
+    (*e).engine.mtu() as u16
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn wgnx_engine_configured(e: *mut WgnxEngine) -> bool {
+    (*e).engine.is_configured()
+}
+
+fn put_prefixes(list: &[Prefix], out: *mut WgnxPrefix, cap: usize) -> usize {
+    for (i, p) in list.iter().take(cap).enumerate() {
+        let mut o = WgnxPrefix { family: 4, len: p.len, ip: [0; 16], reserved: [0; 6] };
+        match p.addr {
+            IpAddr::V4(a) => o.ip[..4].copy_from_slice(&a.octets()),
+            IpAddr::V6(a) => {
+                o.family = 6;
+                o.ip = a.octets();
+            }
+        }
+        unsafe { *out.add(i) = o };
+    }
+    list.len()
+}
+
+/// Our [Interface] addresses with prefix lengths; returns how many there are.
+#[no_mangle]
+pub unsafe extern "C" fn wgnx_engine_addresses(e: *mut WgnxEngine, out: *mut WgnxPrefix, cap: usize) -> usize {
+    put_prefixes((*e).engine.addresses(), out, cap)
+}
+
+/// Destinations that belong to the tunnel (our addresses, then every
+/// peer's AllowedIPs); returns how many there are (can exceed cap).
+#[no_mangle]
+pub unsafe extern "C" fn wgnx_engine_routes(e: *mut WgnxEngine, out: *mut WgnxPrefix, cap: usize) -> usize {
+    put_prefixes(&(*e).engine.routes(), out, cap)
+}
+
+/// Writes "a.b.c.d name\n" for this interface (if named) and every named
+/// peer with an IPv4 /32 AllowedIP, NUL-terminated and truncated to cap.
+/// Returns the full length (like snprintf).
+#[no_mangle]
+pub unsafe extern "C" fn wgnx_engine_hosts(e: *mut WgnxEngine, buf: *mut c_char, cap: usize) -> usize {
+    use core::fmt::Write;
+    let mut s = String::new();
+    for (ip, name) in (*e).engine.hosts() {
+        let _ = writeln!(s, "{ip} {name}");
+    }
+    if !buf.is_null() && cap > 0 {
+        let n = s.len().min(cap - 1);
+        core::ptr::copy_nonoverlapping(s.as_ptr(), buf.cast::<u8>(), n);
+        *buf.add(n) = 0;
+    }
+    s.len()
+}
+
+fn secs_ago(d: Option<Duration>) -> u32 {
+    d.map_or(u32::MAX, |d| d.as_secs().min(u32::MAX as u64 - 1) as u32)
+}
+
+/// Every configured peer, in .conf order, up to max of them into out.
+/// Returns how many there are (can exceed max).
+#[no_mangle]
+pub unsafe extern "C" fn wgnx_engine_peers(e: *mut WgnxEngine, out: *mut WgnxPeerInfo, max: usize) -> usize {
+    let peers = (*e).engine.peers_info();
+    for (i, p) in peers.iter().take(max).enumerate() {
+        let o = &mut *out.add(i);
+        *o = WgnxPeerInfo {
+            name: [0; 32],
+            ipv4: p.ipv4.map_or([0; 4], |a| a.octets()),
+            endpoint_ip: match p.endpoint.map(|a| a.ip()) {
+                Some(IpAddr::V4(a)) => a.octets(),
+                _ => [0; 4],
+            },
+            endpoint_port: p.endpoint.map_or(0, |a| a.port()),
+            keepalive_s: p.keepalive.map_or(0, |k| k.as_secs().min(u16::MAX as u64) as u16),
+            last_handshake_s: secs_ago(p.last_handshake),
+            last_rx_s: secs_ago(p.last_rx),
+            rx_bytes: p.rx_bytes,
+            tx_bytes: p.tx_bytes,
+            flags: (p.session as u32 * WGNX_PEER_SESSION)
+                | (p.endpoint_name as u32 * WGNX_PEER_ENDPOINT_NAME)
+                | (p.resolving as u32 * WGNX_PEER_RESOLVING)
+                | (p.roamed as u32 * WGNX_PEER_ROAMED)
+                | (p.keepalive.is_some() as u32 * WGNX_PEER_KEEPALIVE)
+                | (p.psk as u32 * WGNX_PEER_PSK)
+                | (p.default_route as u32 * WGNX_PEER_DEFAULT_ROUTE),
+            allowed_ips: p.allowed_ips as u32,
+            reserved: 0,
+        };
+        for (dst, src) in o.name.iter_mut().zip(p.name.bytes().take(31)) {
+            *dst = src as c_char;
+        }
+    }
+    peers.len()
 }
 
 // ---- overlay sockets ------------------------------------------------------
@@ -353,7 +402,7 @@ unsafe fn with_net<T>(e: *mut WgnxEngine, f: impl FnOnce(&mut wgnx_core::netstac
     r
 }
 
-/// Starts a TCP connection to a tailnet address. Returns a socket id (> 0)
+/// Starts a TCP connection to a tunnel address. Returns a socket id (> 0)
 /// or a negative WGNX_E* code. Poll writability to learn when it's up.
 #[no_mangle]
 pub unsafe extern "C" fn wgnx_net_tcp_connect(e: *mut WgnxEngine, dst: *const WgnxAddr) -> i32 {
@@ -404,26 +453,14 @@ pub unsafe extern "C" fn wgnx_net_udp_bind(e: *mut WgnxEngine, port: u16) -> i32
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn wgnx_net_udp_sendto(
-    e: *mut WgnxEngine,
-    id: i32,
-    data: *const u8,
-    len: usize,
-    dst: *const WgnxAddr,
-) -> i32 {
+pub unsafe extern "C" fn wgnx_net_udp_sendto(e: *mut WgnxEngine, id: i32, data: *const u8, len: usize, dst: *const WgnxAddr) -> i32 {
     let Some(dst) = to_sockaddr(&*dst) else { return WGNX_EINVAL };
     let data = core::slice::from_raw_parts(data, len);
     with_net(e, |n| n.udp_send_to(id as u32, data, dst).map(|_| len as i32).unwrap_or_else(err))
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn wgnx_net_udp_recvfrom(
-    e: *mut WgnxEngine,
-    id: i32,
-    buf: *mut u8,
-    len: usize,
-    src: *mut WgnxAddr,
-) -> i32 {
+pub unsafe extern "C" fn wgnx_net_udp_recvfrom(e: *mut WgnxEngine, id: i32, buf: *mut u8, len: usize, src: *mut WgnxAddr) -> i32 {
     let buf = core::slice::from_raw_parts_mut(buf, len);
     // Only takes a queued datagram: nothing for the engine to send, so no
     // flush (a datagram read per video packet made it a hot path).
@@ -448,60 +485,6 @@ pub unsafe extern "C" fn wgnx_net_readiness(e: *mut WgnxEngine, id: i32) -> u32 
     (r.readable as u32 * WGNX_READABLE) | (r.writable as u32 * WGNX_WRITABLE) | (r.hup as u32 * WGNX_HUP)
 }
 
-/// Writes "a.b.c.d name\n" for this node and every peer (MagicDNS names,
-/// no trailing dot) into `buf`, NUL-terminated and truncated to `cap`.
-/// Returns the full length (like snprintf).
-/// Copies our current private node key into `out` (32 bytes), to persist it
-/// after WGNX_EVENT_NODE_KEY. Never put it in logs.
-/// A recently used peer and its path (see wgnx_engine_active_peers).
-#[repr(C)]
-pub struct WgnxActivePeer {
-    pub name: [c_char; 32],
-    pub direct: u8,
-    pub _reserved: u8,
-    pub latency_ms: u16,
-    pub relay_region: u32,
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn wgnx_engine_active_peers(e: *mut WgnxEngine, out: *mut WgnxActivePeer, max: usize) -> usize {
-    let peers = (*e).engine.active_peers();
-    let n = peers.len().min(max);
-    for (i, p) in peers.iter().take(n).enumerate() {
-        let o = &mut *out.add(i);
-        o.name = [0; 32];
-        for (dst, src) in o.name.iter_mut().zip(p.name.bytes().take(31)) {
-            *dst = src as c_char;
-        }
-        o.direct = p.relay.is_none() as u8;
-        o._reserved = 0;
-        // Rounded up, so a fast LAN path shows 1 ms, not "unknown".
-        o.latency_ms = p.latency.map_or(0, |l| l.as_micros().div_ceil(1000).clamp(1, u16::MAX as u128) as u16);
-        o.relay_region = p.relay.unwrap_or(0);
-    }
-    peers.len()
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn wgnx_engine_node_key(e: *mut WgnxEngine, out: *mut u8) {
-    core::ptr::copy_nonoverlapping((*e).engine.node_private_key().as_ptr(), out, 32);
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn wgnx_engine_hosts(e: *mut WgnxEngine, buf: *mut c_char, cap: usize) -> usize {
-    use core::fmt::Write;
-    let mut s = String::new();
-    for (ip, name) in (*e).engine.hosts() {
-        let _ = writeln!(s, "{ip} {name}");
-    }
-    if !buf.is_null() && cap > 0 {
-        let n = s.len().min(cap - 1);
-        core::ptr::copy_nonoverlapping(s.as_ptr(), buf.cast::<u8>(), n);
-        *buf.add(n) = 0;
-    }
-    s.len()
-}
-
 /// Bytes of overlay socket buffers in use (TCP buffers, queued datagrams).
 #[no_mangle]
 pub unsafe extern "C" fn wgnx_net_buffer_usage(e: *mut WgnxEngine) -> usize {
@@ -519,7 +502,7 @@ pub unsafe extern "C" fn wgnx_net_close(e: *mut WgnxEngine, id: i32) {
     with_net(e, |n| n.close(id as u32));
 }
 
-/// The overlay socket's local address (our tailnet IP + port). 0 or error.
+/// The overlay socket's local address (our tunnel IP + port). 0 or error.
 #[no_mangle]
 pub unsafe extern "C" fn wgnx_net_local_addr(e: *mut WgnxEngine, id: i32, out: *mut WgnxAddr) -> i32 {
     match (*e).engine.net().local_addr(id as u32) {
@@ -541,132 +524,4 @@ pub unsafe extern "C" fn wgnx_net_peer_addr(e: *mut WgnxEngine, id: i32, out: *m
         }
         None => WGNX_ENOTCONN,
     }
-}
-
-// ---- Taildrop -------------------------------------------------------------
-
-pub const WGNX_DROP_OFFER: u32 = 1;
-pub const WGNX_DROP_COMPLETE: u32 = 2;
-pub const WGNX_DROP_ABORTED: u32 = 3;
-
-#[repr(C)]
-pub struct WgnxDropEvent {
-    pub kind: u32,
-    pub id: u32,
-    /// OFFER: announced size (u64::MAX = unknown). COMPLETE: bytes received.
-    pub size: u64,
-    /// OFFER: the validated file name. Valid until the next poll.
-    pub name: *const c_char,
-    /// OFFER: the sending device's name. ABORTED: why. Valid until the next poll.
-    pub text: *const c_char,
-}
-
-fn c_text(dst: &mut Vec<u8>, s: &str) -> *const c_char {
-    dst.clear();
-    dst.extend(s.bytes().filter(|&b| b != 0));
-    dst.push(0);
-    dst.as_ptr().cast()
-}
-
-/// Starts receiving files on `port` of our tailnet addresses and advertises
-/// it. Returns 0, or -1 if the port is taken.
-#[no_mangle]
-pub unsafe extern "C" fn wgnx_taildrop_enable(e: *mut WgnxEngine, port: u16) -> i32 {
-    let e = &mut *e;
-    match e.engine.taildrop_enable(port) {
-        Ok(()) => 0,
-        Err(_) => -1,
-    }
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn wgnx_taildrop_poll(e: *mut WgnxEngine, out: *mut WgnxDropEvent) -> bool {
-    use wgnx_core::engine::taildrop::DropEvent;
-    let e = &mut *e;
-    let Some(ev) = e.engine.taildrop_poll() else { return false };
-    *out = match ev {
-        DropEvent::Offer { id, name, size, from } => WgnxDropEvent {
-            kind: WGNX_DROP_OFFER,
-            id,
-            size: size.unwrap_or(u64::MAX),
-            name: c_text(&mut e.drop_name, &name),
-            text: c_text(&mut e.drop_text, &from),
-        },
-        DropEvent::Complete { id, bytes } => WgnxDropEvent {
-            kind: WGNX_DROP_COMPLETE,
-            id,
-            size: bytes,
-            name: c_text(&mut e.drop_name, ""),
-            text: c_text(&mut e.drop_text, ""),
-        },
-        DropEvent::Aborted { id, why } => WgnxDropEvent {
-            kind: WGNX_DROP_ABORTED,
-            id,
-            size: 0,
-            name: c_text(&mut e.drop_name, ""),
-            text: c_text(&mut e.drop_text, why),
-        },
-    };
-    true
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn wgnx_taildrop_accept(e: *mut WgnxEngine, id: u32, now_ns: u64) {
-    let e = &mut *e;
-    e.now = Instant::from_nanos(now_ns);
-    e.engine.taildrop_accept(id, e.now);
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn wgnx_taildrop_read(e: *mut WgnxEngine, id: u32, buf: *mut u8, len: usize, now_ns: u64) -> usize {
-    let e = &mut *e;
-    e.now = Instant::from_nanos(now_ns);
-    if buf.is_null() || len == 0 {
-        return 0;
-    }
-    e.engine.taildrop_read(id, core::slice::from_raw_parts_mut(buf, len), e.now)
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn wgnx_taildrop_finish(e: *mut WgnxEngine, id: u32, status: u16, msg: *const c_char, now_ns: u64) {
-    let e = &mut *e;
-    e.now = Instant::from_nanos(now_ns);
-    e.engine.taildrop_finish(id, status, cstr(msg).unwrap_or(""), e.now);
-}
-
-// ---- subnet routes --------------------------------------------------------
-
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub struct WgnxPrefix {
-    /// 4 or 6.
-    pub family: u8,
-    pub len: u8,
-    /// IPv4 uses the first 4 bytes.
-    pub ip: [u8; 16],
-}
-
-/// Uses (or stops using) peers' subnet routes. Off by default.
-#[no_mangle]
-pub unsafe extern "C" fn wgnx_engine_set_accept_routes(e: *mut WgnxEngine, on: bool) {
-    (*e).engine.set_accept_routes(on);
-}
-
-/// Copies up to `cap` subnet routes in use into `out`; returns how many
-/// there are in all.
-#[no_mangle]
-pub unsafe extern "C" fn wgnx_engine_routes(e: *mut WgnxEngine, out: *mut WgnxPrefix, cap: usize) -> usize {
-    let routes = (*e).engine.routes();
-    for (i, (addr, len)) in routes.iter().take(cap).enumerate() {
-        let mut p = WgnxPrefix { family: 4, len: *len, ip: [0; 16] };
-        match addr {
-            IpAddr::V4(a) => p.ip[..4].copy_from_slice(&a.octets()),
-            IpAddr::V6(a) => {
-                p.family = 6;
-                p.ip = a.octets();
-            }
-        }
-        *out.add(i) = p;
-    }
-    routes.len()
 }

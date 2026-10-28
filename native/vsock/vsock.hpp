@@ -1,12 +1,12 @@
 // Socket virtualization: the decision layer between an application's BSD
-// socket calls and either the real network stack or the tailnet overlay.
+// socket calls and either the real network stack or the tunnel overlay.
 //
 // Every socket is created for real, so fd numbers stay unique and plain
 // traffic is untouched. A socket becomes (partly) virtual when it is
-// connected/sent to a tailnet address (100.64.0.0/10, fd7a:115c:a1e0::/48),
-// bound to a tailnet address, or bound to the wildcard address (then it is
-// reachable from both sides: a "dual" socket). Virtual traffic goes through
-// the wgnx engine's overlay sockets.
+// connected/sent to a tunnel address (our own, or inside a peer's
+// AllowedIPs: IsTunnel), bound to a tunnel address, or bound to the wildcard
+// address (then it is reachable from both sides: a "dual" socket). Virtual
+// traffic goes through the wgnx engine's overlay sockets.
 //
 // The same code serves the macOS/Linux interpose shim (tests on the dev
 // machine) and the Switch bsd:u MITM; `Backend` abstracts the real stack and
@@ -101,19 +101,25 @@ public:
     // Closes the virtual side of every socket (the client went away).
     void CloseAll();
     // Whether a datagram socket bound to the wildcard address gets its
-    // overlay side right away (receives from the tailnet before sending
-    // there) or only once it sends to a tailnet address, which saves its
+    // overlay side right away (receives from the tunnel before sending
+    // there) or only once it sends to a tunnel address, which saves its
     // buffers for the many sockets that never do. Default: right away.
     void SetEagerDualUdp(bool eager) { eager_dual_udp_ = eager; }
-    // Tailnet addresses, plus subnet routes in use (SetRoutes) except ones
-    // overlapping our own LAN: the local network is reached directly.
-    static bool IsTailnet(const sockaddr *addr);
-    // The engine's subnet routes (wgnx_engine_routes), from its thread when
-    // peers change. At most MaxRoutes are used.
+    // Whether addr goes through the tunnel: inside one of the routes
+    // (SetRoutes: our own addresses and every peer's AllowedIPs), except
+    // addresses on our own LAN (SetLocalNet), which are reached directly as
+    // with any on-link route, and special ones (loopback, link-local,
+    // multicast, broadcast), which a 0.0.0.0/0 route would otherwise take.
+    static bool IsTunnel(const sockaddr *addr);
+    // The engine's routes (wgnx_engine_routes), after each reload. At most
+    // MaxRoutes are used.
     static constexpr size_t MaxRoutes = 64;
     static void SetRoutes(const WgnxPrefix *routes, size_t n);
     // Our LAN: IPv4 address (host byte order; 0 = offline) and prefix length.
     static void SetLocalNet(uint32_t ip, unsigned len);
+    // Test knob: send LAN addresses through the tunnel too when a route
+    // covers them (forces a stream from a local host through the server).
+    static void SetTunnelLan(bool on);
 
 private:
     struct VFd {
@@ -129,7 +135,7 @@ private:
         WgnxAddr udp_peer{};
         uint16_t port = 0;       // locally bound port
         bool bound_any = false;  // bound to the wildcard address
-        bool virtual_only = false;  // no usable real side (tailnet-bound, accepted)
+        bool virtual_only = false;  // no usable real side (tunnel-bound, accepted)
         bool real_used = false;     // real side carried traffic (must be polled)
         int so_error = 0;
         int rcv_timeout_ms = -1, snd_timeout_ms = -1;

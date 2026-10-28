@@ -1,4 +1,4 @@
-//! Sans-IO Tailscale engine core.
+//! Sans-IO WireGuard engine core.
 //!
 //! This crate never performs I/O, reads clocks, or spawns threads. Drivers
 //! (the host binary, the Switch app, the sysmodule) feed it bytes and time and
@@ -20,17 +20,12 @@ pub(crate) fn trim_vec<T>(v: &mut alloc::vec::Vec<T>) {
 }
 
 pub mod bench;
-pub mod control;
+pub mod config;
 pub mod crypto;
-pub mod derp;
-pub mod disco;
 pub mod engine;
-pub mod http2;
 pub mod netstack;
 pub mod rng;
 pub mod selftest;
-pub mod stream;
-pub mod stun;
 pub mod time;
 pub mod tls;
 

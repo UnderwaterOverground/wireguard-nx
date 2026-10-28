@@ -1,8 +1,9 @@
 // Exercises the socket patterns real apps (Moonlight, curl, ENet, ...) use,
-// against a tailnet peer running TCP+UDP echo on port 7. Plain POSIX: run it
-// under the interpose shim to test the virtualization layer.
+// against a tunnel peer running TCP+UDP echo on port 7. Plain POSIX: run it
+// under the interpose shim (or the Switch's MITM) to test the
+// virtualization layer.
 //
-//   vsock_test <tailnet peer ip> [<non-tailnet ip:port for pass-through>]
+//   vsock_test <peer ip> [<ip:port outside the tunnel, for pass-through> [<our tunnel ip>]]
 #include <arpa/inet.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -16,6 +17,7 @@
 #include <unistd.h>
 
 static struct sockaddr_in peer;
+static struct in_addr our_ip;  // our tunnel address, if given
 static int failures;
 
 #define CHECK(cond, what)                                                         \
@@ -53,7 +55,7 @@ static int tcp_blocking(void) {
     struct sockaddr_in me, them;
     socklen_t ml = sizeof me, tl = sizeof them;
     CHECK(getsockname(fd, (struct sockaddr *)&me, &ml) == 0, "getsockname");
-    CHECK((ntohl(me.sin_addr.s_addr) & 0xffc00000u) == 0x64400000u, "local address is a tailnet address");
+    CHECK(me.sin_addr.s_addr != 0 && (!our_ip.s_addr || me.sin_addr.s_addr == our_ip.s_addr), "local address is our tunnel address");
     CHECK(getpeername(fd, (struct sockaddr *)&them, &tl) == 0 && them.sin_addr.s_addr == peer.sin_addr.s_addr &&
               them.sin_port == peer.sin_port,
           "getpeername");
@@ -134,7 +136,7 @@ static int udp_bound_any(void) {
     return ok;
 }
 
-// A server on 0.0.0.0 listens on the tailnet and the real network; poll()
+// A server on 0.0.0.0 listens on the tunnel and the real network; poll()
 // must report real-side connections too (sys-ftpd and ftpd accept only after
 // poll says the listener is ready).
 static int dual_listener_real_side(void) {
@@ -167,9 +169,9 @@ static int dual_listener_real_side(void) {
     return 1;
 }
 
-// Servers bind to their tailnet address with port 0 and read the chosen port
+// Servers bind to their tunnel address with port 0 and read the chosen port
 // back (ftpd's passive mode).
-static int tailnet_ephemeral_listener(void) {
+static int tunnel_ephemeral_listener(void) {
     int c = socket(AF_INET, SOCK_STREAM, 0);
     CHECK(c >= 0 && connect(c, (struct sockaddr *)&peer, sizeof peer) == 0, "connect to learn our address");
     struct sockaddr_in me = {0};
@@ -178,12 +180,12 @@ static int tailnet_ephemeral_listener(void) {
     close(c);
     int l = socket(AF_INET, SOCK_STREAM, 0);
     me.sin_port = 0;
-    CHECK(bind(l, (struct sockaddr *)&me, sizeof me) == 0, "bind tailnet address, port 0");
+    CHECK(bind(l, (struct sockaddr *)&me, sizeof me) == 0, "bind tunnel address, port 0");
     CHECK(listen(l, 1) == 0, "listen");
     struct sockaddr_in got = {0};
     socklen_t gl = sizeof got;
     CHECK(getsockname(l, (struct sockaddr *)&got, &gl) == 0, "getsockname");
-    CHECK(got.sin_port != 0 && got.sin_addr.s_addr == me.sin_addr.s_addr, "a real port on the tailnet address");
+    CHECK(got.sin_port != 0 && got.sin_addr.s_addr == me.sin_addr.s_addr, "a real port on the tunnel address");
     close(l);
     return 1;
 }
@@ -215,34 +217,35 @@ static int passthrough(const char *target) {
     inet_pton(AF_INET, host, &a.sin_addr);
     int fd = socket(AF_INET, SOCK_STREAM, 0);
     CHECK(fd >= 0, "socket");
-    CHECK(connect(fd, (struct sockaddr *)&a, sizeof a) == 0, "connect to non-tailnet address");
+    CHECK(connect(fd, (struct sockaddr *)&a, sizeof a) == 0, "connect to non-tunnel address");
     struct sockaddr_in me;
     socklen_t ml = sizeof me;
     CHECK(getsockname(fd, (struct sockaddr *)&me, &ml) == 0, "getsockname");
-    CHECK((ntohl(me.sin_addr.s_addr) & 0xffc00000u) != 0x64400000u, "real (non-tailnet) local address");
+    CHECK(!our_ip.s_addr || me.sin_addr.s_addr != our_ip.s_addr, "real (non-tunnel) local address");
     close(fd);
     return 1;
 }
 
 int main(int argc, char **argv) {
     if (argc < 2) {
-        fprintf(stderr, "usage: %s <peer ip> [passthrough ip:port]\n", argv[0]);
+        fprintf(stderr, "usage: %s <peer ip> [passthrough ip:port [our tunnel ip]]\n", argv[0]);
         return 2;
     }
     peer.sin_family = AF_INET;
     peer.sin_port = htons(7);
     if (inet_pton(AF_INET, argv[1], &peer.sin_addr) != 1) return 2;
+    if (argc > 3 && inet_pton(AF_INET, argv[3], &our_ip) != 1) return 2;
     setvbuf(stdout, NULL, _IONBF, 0);
 
     report("tcp blocking + addresses", tcp_blocking());
     report("tcp non-blocking + poll", tcp_nonblocking());
     report("tcp select + read/write", tcp_select());
     report("dual listener: poll sees real connections", dual_listener_real_side());
-    report("tailnet listener on an ephemeral port", tailnet_ephemeral_listener());
+    report("tunnel listener on an ephemeral port", tunnel_ephemeral_listener());
     report("udp unconnected", udp_unconnected());
     report("udp connected", udp_connected());
     report("udp bound to wildcard", udp_bound_any());
-    if (argc > 2) report("pass-through to non-tailnet", passthrough(argv[2]));
+    if (argc > 2) report("pass-through outside the tunnel", passthrough(argv[2]));
     printf(failures ? "%d test(s) failed\n" : "all vsock tests passed\n", failures);
     return failures ? 1 : 0;
 }

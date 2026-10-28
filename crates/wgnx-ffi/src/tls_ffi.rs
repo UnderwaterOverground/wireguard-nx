@@ -1,5 +1,5 @@
 //! Standalone TLS sessions over the C ABI. The C side owns the socket and
-//! shuttles bytes; used by the Switch app's DERP connectivity probe.
+//! shuttles bytes; used by the GitHub update check.
 
 use alloc::boxed::Box;
 use alloc::format;

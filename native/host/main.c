@@ -1,8 +1,7 @@
 // wgnx-c: host build of the C driver + FFI, for testing on the development
-// machine exactly the code paths the Switch app uses.
+// machine exactly the code paths the Switch sysmodule uses.
 //
-//   wgnx-c --control URL [--authkey K] [--hostname H] [--state FILE]
-//          [--extra-root CA.der] [--echo-test 100.x.y.z]
+//   wgnx-c --conf FILE [--port N] [--echo-test <peer ip>] [--sleep-test]
 //   wgnx-c --update-check VERSION   (GitHub release check, as at boot)
 #include <stdio.h>
 #include <stdlib.h>
@@ -23,26 +22,32 @@ static const char *arg(int argc, char **argv, const char *name) {
     return NULL;
 }
 
-static int g_peers;
+static int has(int argc, char **argv, const char *name) {
+    for (int i = 1; i < argc; i++)
+        if (!strcmp(argv[i], name)) return 1;
+    return 0;
+}
+
+static int g_handshakes;
 
 static void on_event(void *ctx, const WgnxEvent *ev) {
     (void)ctx;
-    static const char *names[] = {"log", "login-url", "authorized", "addresses", "peers",
-                                  "home-derp", "error", "endpoints", "peer-path", "node-key", "control"};
+    static const char *names[] = {"log", "addresses", "peers", "error", "resolve", "handshake", "peer-lost"};
     const char *name = ev->kind < sizeof names / sizeof *names ? names[ev->kind] : "?";
-    if (ev->kind == WGNX_EVENT_PEERS) g_peers = (int)ev->value;
+    if (ev->kind == WGNX_EVENT_HANDSHAKE) g_handshakes++;
     printf("[event] %s value=%u %s\n", name, ev->value, ev->text);
     fflush(stdout);
 }
 
-static uint8_t *read_file(const char *path, size_t *len) {
+static char *read_file(const char *path, size_t *len) {
     FILE *f = fopen(path, "rb");
     if (!f) return NULL;
     fseek(f, 0, SEEK_END);
     long n = ftell(f);
     fseek(f, 0, SEEK_SET);
-    uint8_t *buf = malloc((size_t)n);
+    char *buf = malloc((size_t)n + 1);
     *len = fread(buf, 1, (size_t)n, f);
+    buf[*len] = 0;
     fclose(f);
     return buf;
 }
@@ -66,76 +71,84 @@ static int update_check(const char *current) {
 int main(int argc, char **argv) {
     const char *update_version = arg(argc, argv, "--update-check");
     if (update_version) return update_check(update_version);
-    const char *control = arg(argc, argv, "--control");
-    if (!control) {
-        fprintf(stderr, "usage: %s --control URL [--authkey K] [--hostname H] [--state FILE] "
-                        "[--extra-root CA.der] [--echo-test IP]\n       %s --update-check VERSION\n", argv[0], argv[0]);
+    const char *conf_path = arg(argc, argv, "--conf");
+    if (!conf_path) {
+        fprintf(stderr, "usage: %s --conf FILE [--port N] [--echo-test IP] [--sleep-test]\n       %s --update-check VERSION\n", argv[0], argv[0]);
         return 2;
     }
     uint8_t seed[32];
     wgnx_platform_random(seed, sizeof seed);
     wgnx_seed_rng(seed);
 
-    uint8_t machine[32], node[32], disco[32];
-    const char *state = arg(argc, argv, "--state");
-    if (wgnx_state_load_or_create(state ? state : "wgnx-c.state", machine, node, disco) != 0) {
-        fprintf(stderr, "cannot load/create state\n");
+    size_t conf_len = 0;
+    char *conf = read_file(conf_path, &conf_len);
+    if (!conf) {
+        fprintf(stderr, "cannot read %s\n", conf_path);
         return 1;
     }
-    size_t root_len = 0;
-    uint8_t *root = NULL;
-    const char *root_path = arg(argc, argv, "--extra-root");
-    if (root_path && !(root = read_file(root_path, &root_len))) {
-        fprintf(stderr, "cannot read %s\n", root_path);
-        return 1;
-    }
-    const char *hostname = arg(argc, argv, "--hostname");
-    WgnxConfig cfg = {
-        .control_url = control,
-        .auth_key = arg(argc, argv, "--authkey"),
-        .hostname = hostname ? hostname : "wgnx-c",
-        .machine_key = machine,
-        .node_key = node,
-        .disco_key = disco,
-        .extra_root_der = root,
-        .extra_root_len = root_len,
-    };
     bool corrected = false;
-    uint64_t unix_time = wgnx_sane_unix_time((uint64_t)time(NULL), control, &corrected);
-    if (corrected) fprintf(stderr, "warning: system clock implausible; using the server's Date\n");
+    uint64_t unix_time = wgnx_sane_unix_time((uint64_t)time(NULL), WGNX_UPDATE_HOST, &corrected);
+    if (corrected) fprintf(stderr, "warning: system clock implausible; using %s's Date\n", WGNX_UPDATE_HOST);
     if (unix_time == 0) unix_time = (uint64_t)time(NULL);
-    WgnxEngine *engine = wgnx_engine_new(&cfg, wgnx_driver_now_ns(), unix_time);
-    if (!engine) {
-        fprintf(stderr, "wgnx_engine_new failed\n");
+    WgnxEngine *engine = wgnx_engine_new(wgnx_driver_now_ns(), unix_time);
+    WgnxConfig cfg = {.conf = conf, .conf_len = conf_len};
+    char err[160];
+    if (!wgnx_engine_reload(engine, &cfg, wgnx_driver_now_ns(), err, sizeof err)) {
+        fprintf(stderr, "%s: %s\n", conf_path, err);
         return 1;
     }
+    free(conf);
     WgnxDriver *driver = wgnx_driver_new(engine, on_event, NULL);
-    wgnx_driver_set_connect_map(driver, getenv("WGNX_CONNECT_MAP"));
     const char *port = arg(argc, argv, "--port");
-    if (wgnx_driver_open_udp(driver, port ? (uint16_t)atoi(port) : 0) != 0)
-        fprintf(stderr, "warning: no UDP socket; DERP only\n");
+    uint16_t udp_port = port ? (uint16_t)atoi(port) : wgnx_engine_listen_port(engine);
+    if (wgnx_driver_open_udp(driver, udp_port) != 0 && wgnx_driver_open_udp(driver, 0) != 0) {
+        fprintf(stderr, "cannot open a UDP socket\n");
+        return 1;
+    }
 
     const char *echo_ip = arg(argc, argv, "--echo-test");
-    WgnxEcho echo;
-    if (echo_ip) {
-        WgnxAddr target;
-        if (wgnx_parse_ipv4(echo_ip, 7, &target) != 0) {
-            fprintf(stderr, "bad --echo-test address\n");
-            return 2;
-        }
-        wgnx_echo_init(&echo, &target);
+    const int sleep_test = has(argc, argv, "--sleep-test");
+    WgnxAddr target;
+    if (echo_ip && wgnx_parse_ipv4(echo_ip, 7, &target) != 0) {
+        fprintf(stderr, "bad --echo-test address\n");
+        return 2;
     }
+    WgnxEcho echo;
+    int round = 0;  // 0: first echo; 1: after a suspend/resume (--sleep-test)
+    uint64_t resumed_ns = 0;
+    if (echo_ip) wgnx_echo_init(&echo, &target);
     for (;;) {
         if (wgnx_driver_run_once(driver, 50) != 0) {
             fprintf(stderr, "driver error\n");
             return 1;
         }
-        if (echo_ip && g_peers > 0) {
-            int r = wgnx_echo_step(&echo, engine, wgnx_driver_now_ns());
-            if (r) {
-                printf("echo test %s\n", r > 0 ? "PASSED" : "FAILED");
-                return r > 0 ? 0 : 1;
-            }
+        if (!echo_ip) continue;
+        int r = wgnx_echo_step(&echo, engine, wgnx_driver_now_ns());
+        if (!r) continue;
+        if (r < 0) {
+            printf("echo test FAILED%s\n", round ? " after resume" : "");
+            return 1;
         }
+        if (round == 0 && sleep_test) {
+            // What the console does around sleep: close the socket, idle,
+            // reopen it and contact the peers again.
+            printf("echo test PASSED; suspending 5 s\n");
+            fflush(stdout);
+            wgnx_driver_suspend(driver);
+            sleep(5);
+            wgnx_driver_resume(driver);
+            resumed_ns = wgnx_driver_now_ns();
+            wgnx_engine_network_up(engine, resumed_ns);
+            wgnx_echo_init(&echo, &target);
+            round = 1;
+            continue;
+        }
+        if (round == 1) {
+            double secs = (double)(wgnx_driver_now_ns() - resumed_ns) / 1e9;
+            printf("echo test PASSED after resume in %.2f s\n", secs);
+            return secs < 3.0 ? 0 : 1;
+        }
+        printf("echo test PASSED\n");
+        return 0;
     }
 }

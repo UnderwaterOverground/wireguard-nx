@@ -38,7 +38,8 @@ size_t wgnx_heap_classes(char *buf, size_t len);
 
 // Seeds the core's CSPRNG with 32 bytes of entropy. Call once at startup.
 void wgnx_seed_rng(const uint8_t seed[32]);
-// Wall-clock time (Unix seconds) used for certificate validity checks.
+// Wall-clock time (Unix seconds) used for certificate validity checks (the
+// update check's TLS).
 void wgnx_set_unix_time(uint64_t unix_secs);
 
 // Standalone TLS 1.3 session; the caller moves bytes between it and a socket.
@@ -56,27 +57,17 @@ uint32_t wgnx_tls_state(const WgnxTls *s);
 const char *wgnx_tls_last_error(const WgnxTls *s);
 
 // ---- Engine ----------------------------------------------------------------
-// A complete Tailscale node. The caller owns sockets and the clock: perform the
-// I/O it requests, report results back, and call wgnx_engine_timeout by
+// A WireGuard interface configured from a wg-quick style .conf. The caller
+// owns the UDP socket and the clock: perform the sends it requests, feed
+// datagrams back, answer WGNX_EVENT_RESOLVE, and call wgnx_engine_timeout by
 // wgnx_engine_next_deadline. Times are monotonic nanoseconds.
 
 typedef struct WgnxEngine WgnxEngine;
 
 typedef struct {
-    const char *control_url;  // e.g. "https://controlplane.tailscale.com"
-    const char *auth_key;     // may be NULL (interactive login)
-    const char *hostname;
-    const uint8_t *machine_key;  // 32-byte private keys, persisted by the caller
-    const uint8_t *node_key;
-    const uint8_t *disco_key;    // persist too (NULL = new per run; peers then reset sessions)
-    const uint8_t *extra_root_der;  // optional trusted root (DER), for dev servers
-    size_t extra_root_len;
+    const char *conf;  // the .conf text (UTF-8; need not be NUL-terminated)
+    size_t conf_len;
 } WgnxConfig;
-
-#define WGNX_IO_CONNECT 1u  // resolve host (or parse IP literal), TCP connect to port
-#define WGNX_IO_SEND 2u     // write data to connection id
-#define WGNX_IO_CLOSE 3u    // close connection id
-#define WGNX_IO_SEND_UDP 4u // send data as one datagram to addr from the engine's UDP socket
 
 typedef struct {
     uint8_t family;  // 4 or 6
@@ -85,54 +76,105 @@ typedef struct {
 } WgnxAddr;
 
 typedef struct {
-    uint32_t kind;
-    uint32_t id;
-    const char *host;
-    uint16_t port;
-    const uint8_t *data;  // valid until the next wgnx_engine_poll_io
-    size_t len;
-    WgnxAddr addr;        // SEND_UDP destination
-} WgnxIo;
+    uint8_t family;       // 4 or 6
+    uint8_t len;          // prefix length
+    uint8_t ip[16];       // IPv4 in the first 4 bytes
+    uint8_t reserved[6];
+} WgnxPrefix;             // 24 bytes
 
-#define WGNX_EVENT_LOG 0u
-#define WGNX_EVENT_LOGIN_URL 1u
-#define WGNX_EVENT_AUTHORIZED 2u
-#define WGNX_EVENT_ADDRESSES 3u
-#define WGNX_EVENT_PEERS 4u
-#define WGNX_EVENT_HOME_DERP 5u
-#define WGNX_EVENT_ERROR 6u
-#define WGNX_EVENT_ENDPOINTS 7u  // our advertised direct endpoints (text)
-#define WGNX_EVENT_PEER_PATH 8u  // value 1 = direct, 0 = DERP; text describes it
-// Our node key expired and was replaced: save wgnx_engine_node_key() as the
-// state file's node= key (no text; the key is never put in an event).
-#define WGNX_EVENT_NODE_KEY 9u
-// The control server's map stream: value 1 = up, 0 = lost (it retries).
-#define WGNX_EVENT_CONTROL 10u
+#define WGNX_IO_SEND_UDP 1u  // send data as one datagram to addr from the engine's UDP socket
 
 typedef struct {
     uint32_t kind;
-    uint32_t value;    // peer count, DERP region, ...
+    uint32_t reserved;
+    const uint8_t *data;  // valid until the next wgnx_engine_poll_io
+    size_t len;
+    WgnxAddr addr;
+} WgnxIo;
+
+#define WGNX_EVENT_LOG 0u
+#define WGNX_EVENT_ADDRESSES 1u  // text "10.7.0.2/24 ..."; value = count. Once per reload.
+#define WGNX_EVENT_PEERS 2u      // value = configured peers. Once per reload.
+#define WGNX_EVENT_ERROR 3u
+// value = peer index, text = its Endpoint's host name, port = the port:
+// resolve it and call wgnx_engine_set_peer_endpoint. Repeated every 30 s
+// while the peer stays silent (the C driver answers it itself unless a
+// resolver hook takes over; see wgnx_driver.h).
+#define WGNX_EVENT_RESOLVE 4u
+#define WGNX_EVENT_HANDSHAKE 5u  // value = peer index, text = its name: a handshake completed
+#define WGNX_EVENT_PEER_LOST 6u  // value = peer index, text = its name: no answer for 15 s; re-handshaking
+
+typedef struct {
+    uint32_t kind;
+    uint32_t value;
+    uint16_t port;     // RESOLVE
+    uint16_t reserved;
     const char *text;  // valid until the next wgnx_engine_poll_event
 } WgnxEvent;
 
-WgnxEngine *wgnx_engine_new(const WgnxConfig *cfg, uint64_t now_ns, uint64_t unix_secs);
+// An interface with no configuration yet (no address, no peers).
+WgnxEngine *wgnx_engine_new(uint64_t now_ns, uint64_t unix_secs);
+// Parses and applies a .conf. On failure nothing changes and the reason
+// ("line 12: PublicKey: not valid base64") is in err[err_cap] (may be NULL/0).
+// Sessions start over; overlay socket ids stay valid.
+bool wgnx_engine_reload(WgnxEngine *e, const WgnxConfig *cfg, uint64_t now_ns, char *err, size_t err_cap);
 void wgnx_engine_free(WgnxEngine *e);
+bool wgnx_engine_configured(WgnxEngine *e);
 bool wgnx_engine_poll_io(WgnxEngine *e, WgnxIo *out);
 bool wgnx_engine_poll_event(WgnxEngine *e, WgnxEvent *out);
-void wgnx_engine_connected(WgnxEngine *e, uint32_t id, uint64_t now_ns);
-void wgnx_engine_data(WgnxEngine *e, uint32_t id, const uint8_t *data, size_t len, uint64_t now_ns);
-void wgnx_engine_closed(WgnxEngine *e, uint32_t id, uint64_t now_ns);
 // A datagram arrived on the engine's UDP socket.
 void wgnx_engine_udp(WgnxEngine *e, const WgnxAddr *src, const uint8_t *data, size_t len, uint64_t now_ns);
-// Local UDP endpoints (interface address + bound port) to advertise to peers.
-void wgnx_engine_set_local_endpoints(WgnxEngine *e, const WgnxAddr *eps, size_t n, uint64_t now_ns);
 void wgnx_engine_timeout(WgnxEngine *e, uint64_t now_ns);
-// The network came back (offline -> online): control and DERP retry now
-// instead of waiting out their backoff. Leaves connections that are up alone.
-void wgnx_engine_network_up(WgnxEngine *e, uint64_t now_ns);
 uint64_t wgnx_engine_next_deadline(WgnxEngine *e);
+// The network came back or changed (Wi-Fi after a wake, a new address):
+// host names are resolved again and every reachable peer is contacted now.
+void wgnx_engine_network_up(WgnxEngine *e, uint64_t now_ns);
+// Answer to WGNX_EVENT_RESOLVE (any time; also overrides an endpoint).
+void wgnx_engine_set_peer_endpoint(WgnxEngine *e, uint32_t peer, const WgnxAddr *addr, uint64_t now_ns);
+// [Interface] ListenPort, 0 if none: bind the UDP socket there.
+uint16_t wgnx_engine_listen_port(WgnxEngine *e);
+uint16_t wgnx_engine_mtu(WgnxEngine *e);
+// Our [Interface] addresses with prefix lengths. Returns how many there are.
+size_t wgnx_engine_addresses(WgnxEngine *e, WgnxPrefix *out, size_t cap);
+// Destinations that belong to the tunnel, for the socket layer: our own
+// addresses (/32, /128), then every peer's AllowedIPs, each once. Fixed
+// between reloads. Returns how many there are (can exceed cap).
+size_t wgnx_engine_routes(WgnxEngine *e, WgnxPrefix *out, size_t cap);
+// "a.b.c.d name\n" for this interface (if its .conf names it) and every
+// peer with an IPv4 /32 AllowedIP; NUL-terminated, truncated to cap.
+// Returns the full length (like snprintf).
+size_t wgnx_engine_hosts(WgnxEngine *e, char *buf, size_t cap);
 
-// ---- Overlay sockets (tailnet side) -------------------------------------------
+#define WGNX_PEER_SESSION 1u         // a handshake in the last 180 s
+#define WGNX_PEER_ENDPOINT_NAME 2u   // Endpoint= is a host name ...
+#define WGNX_PEER_RESOLVING 4u       // ... not resolved yet (nothing to send to)
+#define WGNX_PEER_ROAMED 8u          // endpoint differs from the configured one (learned from traffic)
+#define WGNX_PEER_KEEPALIVE 16u      // PersistentKeepalive set
+#define WGNX_PEER_PSK 32u            // PresharedKey set
+#define WGNX_PEER_DEFAULT_ROUTE 64u  // AllowedIPs has 0.0.0.0/0 or ::/0
+typedef struct {
+    char name[32];              // NUL-terminated; from "# Name = ..." or "peerN"
+    uint8_t ipv4[4];            // first IPv4 /32 AllowedIP, else 0.0.0.0
+    uint8_t endpoint_ip[4];     // current endpoint, 0.0.0.0 if none
+    uint16_t endpoint_port;
+    uint16_t keepalive_s;       // PersistentKeepalive, 0 = off
+    uint32_t last_handshake_s;  // seconds ago; UINT32_MAX = never
+    uint32_t last_rx_s;         // seconds since the last authenticated packet; UINT32_MAX = never
+    uint32_t flags;             // WGNX_PEER_*
+    uint64_t rx_bytes;          // wire bytes (like `wg show ... transfer`)
+    uint64_t tx_bytes;
+    uint32_t allowed_ips;       // prefix count
+    uint32_t reserved;
+} WgnxPeerInfo;                 // 80 bytes
+#ifdef __cplusplus
+static_assert(sizeof(WgnxPeerInfo) == 80, "WgnxPeerInfo layout");
+static_assert(sizeof(WgnxPrefix) == 24, "WgnxPrefix layout");
+#endif
+// Every configured peer, in .conf order, up to max of them into out.
+// Returns how many there are (can exceed max).
+size_t wgnx_engine_peers(WgnxEngine *e, WgnxPeerInfo *out, size_t max);
+
+// ---- Overlay sockets (tunnel side) ------------------------------------------
 // Non-blocking. Ids are > 0; errors are negative WGNX_E* codes.
 
 #define WGNX_EAGAIN (-1)
@@ -158,21 +200,6 @@ int32_t wgnx_net_udp_bind(WgnxEngine *e, uint16_t port);
 int32_t wgnx_net_udp_sendto(WgnxEngine *e, int32_t id, const uint8_t *data, size_t len, const WgnxAddr *dst);
 int32_t wgnx_net_udp_recvfrom(WgnxEngine *e, int32_t id, uint8_t *buf, size_t len, WgnxAddr *src);
 uint32_t wgnx_net_readiness(WgnxEngine *e, int32_t id);
-// Writes "a.b.c.d name\n" for this node and every peer (MagicDNS names, no
-// trailing dot), NUL-terminated and truncated to cap. Returns the full length.
-size_t wgnx_engine_hosts(WgnxEngine *e, char *buf, size_t cap);
-// Peers we sent to in the last 45 s, most recent first: up to max of them
-// into out. Returns how many there are (can be more than max).
-typedef struct {
-    char name[32];          // first label of its name, NUL-terminated
-    uint8_t direct;         // 1: confirmed direct path; 0: relayed (DERP)
-    uint8_t reserved;
-    uint16_t latency_ms;    // the path's round trip, direct or relayed (0 if unknown)
-    uint32_t relay_region;  // when relayed: the DERP region (0 if unknown)
-} WgnxActivePeer;
-size_t wgnx_engine_active_peers(WgnxEngine *e, WgnxActivePeer *out, size_t max);
-// Our current private node key (32 bytes), for the state file.
-void wgnx_engine_node_key(WgnxEngine *e, uint8_t out[32]);
 // Bytes of overlay socket buffers in use (TCP buffers, queued datagrams).
 size_t wgnx_net_buffer_usage(WgnxEngine *e);
 // Most bytes of overlay socket buffers allowed at once (new TCP connections
@@ -181,43 +208,6 @@ void wgnx_net_set_budget(WgnxEngine *e, size_t bytes);
 void wgnx_net_close(WgnxEngine *e, int32_t id);
 int32_t wgnx_net_local_addr(WgnxEngine *e, int32_t id, WgnxAddr *out);
 int32_t wgnx_net_peer_addr(WgnxEngine *e, int32_t id, WgnxAddr *out);
-
-// Taildrop receive (the peer API's PUT /v0/put/<name>). After enabling, the
-// driver polls for events: OFFER (answer with accept, or finish with an
-// error status), then reads the body with wgnx_taildrop_read until COMPLETE
-// (then finish with 200 once the file is saved) or ABORTED (discard it; no
-// finish needed). The engine never touches files.
-#define WGNX_DROP_OFFER 1u
-#define WGNX_DROP_COMPLETE 2u
-#define WGNX_DROP_ABORTED 3u
-
-typedef struct {
-    uint32_t kind;
-    uint32_t id;
-    uint64_t size;     // OFFER: announced size (UINT64_MAX = unknown); COMPLETE: bytes received
-    const char *name;  // OFFER: validated file name (safe in any directory)
-    const char *text;  // OFFER: sending device; ABORTED: why
-} WgnxDropEvent;      // strings valid until the next wgnx_taildrop_poll
-
-// Listens on `port` of our tailnet addresses and advertises it. 0 or -1.
-int32_t wgnx_taildrop_enable(WgnxEngine *e, uint16_t port);
-bool wgnx_taildrop_poll(WgnxEngine *e, WgnxDropEvent *out);
-void wgnx_taildrop_accept(WgnxEngine *e, uint32_t id, uint64_t now_ns);
-// Body bytes into buf; 0 when none are available yet or the transfer ended.
-size_t wgnx_taildrop_read(WgnxEngine *e, uint32_t id, uint8_t *buf, size_t len, uint64_t now_ns);
-// Ends a transfer: 200 when saved, else an HTTP error status (e.g. 507 no
-// space, 500 write failed) and a message the sender shows.
-void wgnx_taildrop_finish(WgnxEngine *e, uint32_t id, uint16_t status, const char *msg, uint64_t now_ns);
-
-// Subnet routes (like `tailscale up --accept-routes`; off by default).
-typedef struct {
-    uint8_t family;  // 4 or 6
-    uint8_t len;     // prefix length
-    uint8_t ip[16];  // IPv4 uses the first 4 bytes
-} WgnxPrefix;
-void wgnx_engine_set_accept_routes(WgnxEngine *e, bool on);
-// Copies up to cap routes in use into out; returns how many there are.
-size_t wgnx_engine_routes(WgnxEngine *e, WgnxPrefix *out, size_t cap);
 
 // Must be provided by the embedding program on no_std targets. Called with a
 // (non NUL-terminated) panic message; must not return.

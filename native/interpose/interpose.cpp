@@ -142,28 +142,20 @@ std::string Env(const char *name, const char *def = "") {
 }
 
 void Init() {
-    std::string url = Env("WGNX_CONTROL_URL");
-    if (url.empty()) return;
+    std::string conf = Env("WGNX_CONF");
+    if (conf.empty()) return;
     g_initializing = true;
     struct Done {
         ~Done() { g_initializing = false; }
     } done;
     auto *st = new State();
     wgnx::RuntimeConfig cfg;
-    cfg.control_url = url;
-    cfg.auth_key = Env("WGNX_AUTHKEY");
-    cfg.hostname = Env("WGNX_HOSTNAME", "wgnx-interpose");
-    cfg.state_path = Env("WGNX_STATE", "wgnx-interpose.state");
-    cfg.extra_root_path = Env("WGNX_EXTRA_ROOT");
-    cfg.connect_map = Env("WGNX_CONNECT_MAP");
+    cfg.conf_path = conf;
     cfg.udp_port = static_cast<uint16_t>(atoi(Env("WGNX_PORT", "0").c_str()));
-    cfg.taildrop_dir = Env("WGNX_TAILDROP_DIR");
-    cfg.taildrop_port = static_cast<uint16_t>(atoi(Env("WGNX_TAILDROP_PORT", "41643").c_str()));
-    cfg.accept_routes = Env("WGNX_ACCEPT_ROUTES") == "1";
-    static std::atomic<int> peers{0};
+    static std::atomic<int> handshakes{0};
     bool log = Env("WGNX_LOG") == "1";
     cfg.on_event = [log](const WgnxEvent &ev) {
-        if (ev.kind == WGNX_EVENT_PEERS) peers = static_cast<int>(ev.value);
+        if (ev.kind == WGNX_EVENT_HANDSHAKE) handshakes++;
         if (log) fprintf(stderr, "[wgnx] event %u value=%u %s\n", ev.kind, ev.value, ev.text);
     };
     int log_level = atoi(Env("WGNX_LOG_LEVEL", log ? "3" : "0").c_str());
@@ -190,9 +182,10 @@ void Init() {
             }
         }).detach();
     }
+    // WGNX_WAIT_READY=1: hold the first socket call until a peer handshake.
     if (Env("WGNX_WAIT_READY") == "1") {
-        for (int i = 0; i < 300 && peers == 0; i++) usleep(100000);
-        if (peers == 0) fprintf(stderr, "[wgnx] warning: tailnet not ready after 30s\n");
+        for (int i = 0; i < 300 && handshakes == 0; i++) usleep(100000);
+        if (handshakes == 0) fprintf(stderr, "[wgnx] warning: no handshake after 30s\n");
     }
 }
 

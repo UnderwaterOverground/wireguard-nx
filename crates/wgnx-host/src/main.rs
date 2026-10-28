@@ -1,11 +1,9 @@
-//! Host driver for wgnx-core. For now: diagnostics subcommands used while
-//! bringing up each protocol layer against real servers.
+//! Host driver for wgnx-core: runs a .conf against real peers on the
+//! development machine, plus diagnostics.
 use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use wgnx_core::control::{self, conn::ControlConn};
-use wgnx_core::http2::Event;
 use wgnx_core::tls::{self, TlsClient};
 
 /// Counts heap usage so the Switch builds' heap budget can be sized from
@@ -36,7 +34,8 @@ static ALLOC: heap::Counting = heap::Counting;
 
 mod driver;
 mod echo;
-mod net;
+
+const USAGE: &str = "selftest | genkey | tls-probe [host[:port]] [path] | check --conf FILE | up --conf FILE [--port N] [--echo-test IP] [--expect-handshake] [--duration SECS] [--bulk BYTES]";
 
 fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
@@ -46,18 +45,11 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let result = match args.first().map(String::as_str) {
         Some("selftest") | None => selftest(),
-        Some("tls-probe") => tls_probe(
-            args.get(1).map(String::as_str).unwrap_or("derp1.tailscale.com"),
-            args.get(2).map(String::as_str).unwrap_or("/derp/probe"),
-        ),
-        Some("control-probe") => control_probe(
-            args.get(1).map(String::as_str).unwrap_or("https://controlplane.tailscale.com"),
-            args.get(2).map(String::as_str),
-        ),
+        Some("genkey") => genkey(),
+        Some("tls-probe") => tls_probe(args.get(1).map(String::as_str).unwrap_or("github.com"), args.get(2).map(String::as_str).unwrap_or("/")),
+        Some("check") => check(&args[1..]),
         Some("up") => up(&args[1..]),
-        Some(other) => Err(format!(
-            "unknown command {other:?}; try selftest | tls-probe [host[:port]] [path] | control-probe <url> [authkey] | up --control URL [--authkey K] [--hostname H] [--state FILE] [--port N] [--echo-test IP [--expect-direct]]"
-        )),
+        Some(other) => Err(format!("unknown command {other:?}; try {USAGE}")),
     };
     log::info!(
         "heap: {} KB in use, peak {} KB",
@@ -70,28 +62,33 @@ fn main() {
     }
 }
 
+/// Prints a new private key and its public key, base64 as .conf files use.
+fn genkey() -> Result<(), String> {
+    use base64::Engine as _;
+    let private = wgnx_core::rng::bytes32().map_err(|_| "rng not seeded")?;
+    let b64 = base64::engine::general_purpose::STANDARD;
+    println!("PrivateKey = {}", b64.encode(private));
+    println!("PublicKey = {}", b64.encode(wgnx_core::crypto::x25519_public(&private)));
+    Ok(())
+}
+
 fn selftest() -> Result<(), String> {
     wgnx_core::selftest::run().map_err(|f| format!("selftest failed: {f:?}"))?;
     println!("wgnx-host {}: selftest ok", wgnx_core::VERSION);
     Ok(())
 }
 
-/// HTTPS GET over the sans-IO TLS client, pumping a blocking TcpStream.
+/// HTTPS GET over the sans-IO TLS client, pumping a blocking TcpStream (the
+/// update check's code path).
 fn tls_probe(target: &str, path: &str) -> Result<(), String> {
     let (host, port) = match target.rsplit_once(':') {
         Some((h, p)) => (h, p.parse::<u16>().map_err(|e| e.to_string())?),
         None => (target, 443),
     };
-    // WGNX_EXTRA_ROOT: path to a DER certificate to trust (dev DERP servers).
-    let extra: Vec<Vec<u8>> = match std::env::var("WGNX_EXTRA_ROOT") {
-        Ok(path) => vec![std::fs::read(&path).map_err(|e| format!("{path}: {e}"))?],
-        Err(_) => vec![],
-    };
-    let config = tls::client_config(&extra).map_err(|e| e.to_string())?;
+    let config = tls::client_config(&[]).map_err(|e| e.to_string())?;
     let mut tls = TlsClient::new(config, host).map_err(|e| format!("{e:?}"))?;
     let mut sock = TcpStream::connect((host, port)).map_err(|e| e.to_string())?;
-    tls.write(format!("GET {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n").as_bytes())
-        .map_err(|e| format!("{e:?}"))?;
+    tls.write(format!("GET {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n").as_bytes()).map_err(|e| format!("{e:?}"))?;
 
     let mut response = Vec::new();
     let mut buf = [0u8; 16384];
@@ -119,178 +116,75 @@ fn tls_probe(target: &str, path: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Fetches the control key, opens a ts2021 channel and sends one register
-/// request with throwaway keys, printing the server's answer.
-fn control_probe(url: &str, auth_key: Option<&str>) -> Result<(), String> {
-    let target = net::Target::parse(url)?;
-    let mut s = net::Stream::connect(&target)?;
-    s.write(&control::key_request(&target.host))?;
-    let resp = s.read_to_end()?;
-    let control_key = control::parse_key_response(&resp).map_err(|e| format!("/key: {e}"))?;
-    println!("control key: mkey:{}", control::hex32(&control_key));
-
-    let machine = wgnx_core::rng::bytes32().unwrap();
-    let node = wgnx_core::rng::bytes32().unwrap();
-    let ephemeral = wgnx_core::rng::bytes32().unwrap();
-    let mut conn = ControlConn::new(&target.host, &machine, &control_key, &ephemeral, control::CAPABILITY_VERSION)
-        .map_err(|e| format!("{e:?}"))?;
-    let mut s = net::Stream::connect(&target)?;
-    s.write(&conn.take_outgoing())?;
-    while !conn.is_ready() {
-        let data = s.read()?;
-        if data.is_empty() {
-            return Err("EOF during ts2021 setup".into());
-        }
-        conn.feed(&data).map_err(|e| format!("{e:?}"))?;
-        s.write(&conn.take_outgoing())?;
-    }
-    println!("ts2021 up; early payload: {}", conn.early_payload().map(String::from_utf8_lossy).unwrap_or_default());
-
-    let node_pub = wgnx_core::crypto::x25519_public(&node);
-    let auth = auth_key.map(|k| format!(r#","Auth":{{"AuthKey":"{k}"}}"#)).unwrap_or_default();
-    let body = format!(
-        r#"{{"Version":{},"NodeKey":"nodekey:{}","Hostinfo":{{"Hostname":"wgnx-probe","OS":"linux","GoArch":"arm64"}}{auth}}}"#,
-        control::CAPABILITY_VERSION,
-        control::hex32(&node_pub)
-    );
-    let stream = conn
-        .request("POST", "/machine/register", &[("content-type", "application/json")], body.as_bytes())
-        .map_err(|e| format!("{e:?}"))?;
-    s.write(&conn.take_outgoing())?;
-    let mut response = Vec::new();
-    loop {
-        while let Some(ev) = conn.poll_event() {
-            match ev {
-                Event::Response { stream: id, status, .. } if id == stream => println!("register: HTTP {status}"),
-                Event::Data { stream: id, data } if id == stream => response.extend(data),
-                Event::End { stream: id } if id == stream => {
-                    println!("{}", String::from_utf8_lossy(&response));
-                    return Ok(());
-                }
-                Event::Reset { code, .. } => return Err(format!("stream reset: {code}")),
-                Event::GoAway { code, .. } => return Err(format!("goaway: {code}")),
-                _ => {}
-            }
-        }
-        let data = s.read()?;
-        if data.is_empty() {
-            return Err("EOF awaiting register response".into());
-        }
-        conn.feed(&data).map_err(|e| format!("{e:?}"))?;
-        s.write(&conn.take_outgoing())?;
-    }
-}
-
 fn flag<'a>(args: &'a [String], name: &str) -> Option<&'a str> {
     args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).map(String::as_str)
 }
 
-/// Loads machine/node private keys from `path`, creating them on first run.
-fn load_or_create_keys(path: &str) -> Result<([u8; 32], [u8; 32], [u8; 32]), String> {
-    let existing = std::fs::read_to_string(path).ok();
-    let field = |name: &str| -> Option<[u8; 32]> {
-        existing
-            .as_deref()?
-            .lines()
-            .find_map(|l| l.strip_prefix(&format!("{name}=")))
-            .and_then(control::parse_hex32)
-    };
-    let machine = field("machine").unwrap_or_else(|| wgnx_core::rng::bytes32().unwrap());
-    let node = field("node").unwrap_or_else(|| wgnx_core::rng::bytes32().unwrap());
-    // Persisted (see EngineConfig::disco_private).
-    let disco = field("disco").unwrap_or_else(|| wgnx_core::rng::bytes32().unwrap());
-    if field("disco").is_none() {
-        std::fs::write(
-            path,
-            format!(
-                "machine={}\nnode={}\ndisco={}\n",
-                control::hex32(&machine),
-                control::hex32(&node),
-                control::hex32(&disco)
-            ),
-        )
-        .map_err(|e| format!("{path}: {e}"))?;
-    }
-    Ok((machine, node, disco))
+fn load_conf(args: &[String]) -> Result<wgnx_core::config::WgConfig, String> {
+    let path = flag(args, "--conf").ok_or("--conf FILE is required")?;
+    let text = std::fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))?;
+    wgnx_core::config::parse(&text).map_err(|e| format!("{path}: {e}"))
 }
 
-/// Replaces the node key in the state file (control rotated an expired one).
-fn save_node_key(path: &str, node: &[u8; 32]) -> Result<(), String> {
-    let old = std::fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))?;
-    let new: String = old
-        .lines()
-        .map(|l| if l.starts_with("node=") { format!("node={}\n", control::hex32(node)) } else { format!("{l}\n") })
-        .collect();
-    std::fs::write(path, new).map_err(|e| format!("{path}: {e}"))
+/// Parses a .conf and prints what the engine makes of it.
+fn check(args: &[String]) -> Result<(), String> {
+    let cfg = load_conf(args)?;
+    let i = &cfg.interface;
+    println!(
+        "interface{}: {} listen {} mtu {}",
+        i.name.as_deref().map(|n| format!(" {n}")).unwrap_or_default(),
+        i.addresses.iter().map(|p| format!("{}/{}", p.addr, p.len)).collect::<Vec<_>>().join(" "),
+        i.listen_port.map_or("any".to_string(), |p| p.to_string()),
+        i.mtu.unwrap_or(wgnx_core::engine::DEFAULT_MTU as u16)
+    );
+    for p in &cfg.peers {
+        let endpoint = match &p.endpoint {
+            Some((wgnx_core::config::EndpointHost::Ip(ip), port)) => format!("{ip}:{port}"),
+            Some((wgnx_core::config::EndpointHost::Name(n), port)) => format!("{n}:{port} (name)"),
+            None => "none".into(),
+        };
+        println!(
+            "peer {}: endpoint {endpoint}, allowed {}, keepalive {}, psk {}",
+            p.name,
+            p.allowed_ips.iter().map(|q| format!("{}/{}", q.addr, q.len)).collect::<Vec<_>>().join(" "),
+            p.persistent_keepalive.map_or("off".to_string(), |k| format!("{k} s")),
+            if p.preshared_key.is_some() { "yes" } else { "no" }
+        );
+    }
+    Ok(())
 }
 
 fn up(args: &[String]) -> Result<(), String> {
-    let url = flag(args, "--control").ok_or("--control URL is required")?;
-    let state = flag(args, "--state").unwrap_or("wgnx-host.state");
-    let (machine_private, node_private, disco_private) = load_or_create_keys(state)?;
-    let extra_roots = match std::env::var("WGNX_EXTRA_ROOT") {
-        Ok(p) => vec![std::fs::read(&p).map_err(|e| format!("{p}: {e}"))?],
-        Err(_) => vec![],
-    };
-    let cfg = wgnx_core::engine::EngineConfig {
-        control: control::client::ControlConfig {
-            url: url.into(),
-            auth_key: flag(args, "--authkey").map(Into::into),
-            hostname: flag(args, "--hostname").unwrap_or("wgnx-host").into(),
-            extra_roots,
-        },
-        machine_private,
-        node_private,
-        disco_private,
-    };
+    let cfg = load_conf(args)?;
     let bulk = flag(args, "--bulk").map(|n| n.parse().expect("--bulk bytes")).unwrap_or(0);
     let mut echo = flag(args, "--echo-test").map(|ip| echo::EchoTest::new(ip.parse().expect("--echo-test IP"), bulk));
-    let ready = std::cell::Cell::new(false);
-    let key_changed = std::cell::Cell::new(false);
-    let direct = std::cell::Cell::new(false);
-    let expect_direct = args.iter().any(|a| a == "--expect-direct");
-    let deadline = std::cell::Cell::new(None::<std::time::Instant>);
+    let handshaken = std::cell::Cell::new(false);
+    let expect_handshake = args.iter().any(|a| a == "--expect-handshake");
+    let duration = flag(args, "--duration").map(|s| std::time::Duration::from_secs(s.parse().expect("--duration seconds")));
+    let started = std::time::Instant::now();
     let udp_port = flag(args, "--port").map(|p| p.parse().expect("--port")).unwrap_or(0);
     let result = driver::run_engine(
         cfg,
         udp_port,
         |ev| {
-            if matches!(ev, wgnx_core::engine::Event::NodeKeyChanged) {
-                key_changed.set(true);
-            }
-            if matches!(ev, wgnx_core::engine::Event::Peers(n) if *n > 0) {
-                ready.set(true);
-            }
-            if matches!(ev, wgnx_core::engine::Event::PeerPath { direct: Some(_), .. }) {
-                direct.set(true);
+            if matches!(ev, wgnx_core::engine::Event::Handshake { .. }) {
+                handshaken.set(true);
             }
             log::info!("{ev:?}");
         },
         |engine, clock| {
-            if key_changed.take() {
-                if let Err(e) = save_node_key(state, &engine.node_private_key()) {
-                    log::error!("{e}");
-                }
+            if duration.is_some_and(|d| started.elapsed() >= d) {
+                return false;
             }
             match echo.as_mut() {
-            Some(t) if ready.get() => {
-                if t.step(engine, clock) {
-                    return true;
-                }
-                // Echo finished; optionally wait (up to 20s) for a direct path.
-                if !expect_direct || direct.get() {
-                    return false;
-                }
-                let d = *deadline.get().get_or_insert(std::time::Instant::now() + std::time::Duration::from_secs(20));
-                deadline.set(Some(d));
-                std::time::Instant::now() < d
-            }
-            _ => true,
+                Some(t) => t.step(engine, clock),
+                // Nothing to wait for but the handshake, if one is expected.
+                None => !(expect_handshake && duration.is_none() && handshaken.get()),
             }
         },
     );
-    if expect_direct && !direct.get() {
-        return Err("no direct path established".into());
+    if expect_handshake && !handshaken.get() {
+        return Err("no handshake completed".into());
     }
     if let Some(t) = echo {
         return t.result();

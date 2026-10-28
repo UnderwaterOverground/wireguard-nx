@@ -31,6 +31,8 @@ struct Peer {
     queue: Queue,
     keepalive: Option<Handle<Event>>,
     send_another_keepalive: bool,
+    // wgnx: when the current session's handshake completed (for `wg show`-style status).
+    last_handshake: Option<Instant>,
 }
 
 impl From<PeerConfig> for Peer {
@@ -44,6 +46,7 @@ impl From<PeerConfig> for Peer {
             keepalive: None,
             queue: Default::default(),
             send_another_keepalive: false,
+            last_handshake: None,
         }
     }
 }
@@ -139,6 +142,7 @@ impl Peer {
 
         self.session
             .activate(endpoint, self.config.id, session, now);
+        self.last_handshake = Some(now); // wgnx
         let mut packets = self.queue.drain();
         if packets.is_empty() {
             // Initiator must transmit one packet to confirm session. If there are none queued,
@@ -183,6 +187,7 @@ impl Peer {
 
         self.session
             .activate(endpoint, self.config.id, session, now);
+        self.last_handshake = Some(now); // wgnx
         let mut packets = self.queue.drain();
         if !packets.is_empty() {
             // Session was just activated, so can always send.
@@ -544,6 +549,18 @@ impl Endpoint {
     /// Return the peer id that has the selected node key.
     pub fn peer_id(&self, key: NodePublicKey) -> Option<PeerId> {
         self.state.ids.get_by_nodekey(&key)
+    }
+
+    // wgnx: status for the UI.
+    /// When the peer's latest session was established (a handshake completed in either role),
+    /// if one has been since the peer was added.
+    pub fn peer_last_handshake(&self, id: PeerId) -> Option<Instant> {
+        self.peers.get(&id)?.last_handshake
+    }
+
+    /// Whether the peer has a usable session at `now`.
+    pub fn peer_session_active(&self, id: PeerId, now: Instant) -> bool {
+        self.peers.get(&id).is_some_and(|p| p.session.is_active(now))
     }
 }
 

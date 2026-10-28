@@ -22,7 +22,7 @@ int wgnx_snprintf(char *dst, size_t size, const char *fmt, ...);
 #define snprintf wgnx_snprintf
 #endif
 
-#define HOST "github.com"
+#define HOST WGNX_UPDATE_HOST
 
 struct WgnxUpdate {
     int fd;

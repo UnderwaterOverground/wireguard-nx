@@ -1,6 +1,6 @@
-# Local tailnet for end-to-end tests: headscale (control + DERP + STUN) and a
-# stock tailscaled peer with echo services. wgnx clients join with the
-# pre-auth key written to state/authkey by setup.sh.
+# Local WireGuard network for end-to-end tests: two stock peers
+# (wireguard-go) with echo services, and the wgnx client built for Linux.
+# setup.sh generates the keys and .conf files under state/.
 name: wgnx-e2e
 
 networks:
@@ -10,66 +10,38 @@ networks:
         - subnet: 172.30.0.0/24
 
 services:
-  headscale:
-    image: headscale/headscale:latest
-    command: serve
-    volumes:
-      - ./headscale/config.yaml:/etc/headscale/config.yaml:ro
-      - ./headscale/policy.hujson:/etc/headscale/policy.hujson:ro
-      - ./state/certs:/certs:ro
-      - ./state/headscale:/var/lib/headscale
-    networks:
-      wgnx:
-        ipv4_address: 172.30.0.10
-    ports:
-      - "127.0.0.1:8443:443"
-    healthcheck:
-      test: ["CMD", "headscale", "health"]
-      interval: 2s
-      retries: 30
-
-  # A real Tailscale node to talk to. Kernel networking so ping/UDP behave
-  # exactly as on a normal machine.
+  # The server most tests talk to: wg 10.7.0.1, UDP 51820, with every
+  # client from state/keys.txt as a peer.
   peer:
-    image: tailscale/tailscale:stable
-    hostname: peer1
-    environment:
-      TS_AUTHKEY: file:/state/authkey
-      TS_EXTRA_ARGS: --login-server=https://headscale
-      TS_STATE_DIR: /var/lib/tailscale
-      TS_USERSPACE: "false"
-      TS_HOSTNAME: peer1
-      SSL_CERT_FILE: /certs/ca.pem
+    build: { context: ., dockerfile: Dockerfile.peer }
+    image: wgnx-e2e-peer
     volumes:
-      - ./state/certs:/certs:ro
-      - ./state:/state:ro
-      - ./state/peer:/var/lib/tailscale
+      - ./state/wg0.conf:/etc/wireguard/wg0.conf:ro
     devices:
       - /dev/net/tun:/dev/net/tun
-    cap_add: [NET_ADMIN, NET_RAW]
+    cap_add: [NET_ADMIN]
     networks:
       wgnx:
         ipv4_address: 172.30.0.20
-    depends_on:
-      headscale:
-        condition: service_healthy
+        aliases: [wg-server]
     profiles: [peer]
 
-  # Echo services inside the peer's network namespace, reachable on its
-  # tailnet IP: TCP 7 and UDP 7 echo.
-  echo:
-    image: alpine/socat:latest
-    network_mode: service:peer
-    entrypoint: ["/bin/sh", "-c"]
-    command:
-      - |
-        socat TCP-LISTEN:7,fork,reuseaddr EXEC:cat &
-        socat UDP-RECVFROM:7,fork EXEC:cat &
-        wait
+  # A second server (wg 10.7.0.9) for the several-peers test.
+  peer2:
+    image: wgnx-e2e-peer
+    volumes:
+      - ./state/wg0-peer2.conf:/etc/wireguard/wg0.conf:ro
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    cap_add: [NET_ADMIN]
+    networks:
+      wgnx:
+        ipv4_address: 172.30.0.21
     depends_on: [peer]
     profiles: [peer]
 
-  # HTTP (8080) and iperf3 (5201) servers on peer1's tailnet IP.
+  # HTTP (8080) and iperf3 (5201) servers inside peer's network namespace,
+  # reachable on its tunnel address (and its real one, for pass-through).
   web:
     image: python:3-alpine
     network_mode: service:peer
@@ -84,10 +56,9 @@ services:
     depends_on: [peer]
     profiles: [peer]
 
-  # wgnx-host built for Linux and run on the compose network, so direct UDP
-  # paths to peer1 are possible (the Mac cannot reach container IPs).
+  # wgnx-host built for Linux and run on the compose network.
   # Build:  docker compose run --rm wgnx-build
-  # Run:    docker compose run --rm wgnx up --control https://headscale ...
+  # Run:    docker compose run --rm wgnx up --conf /state/client.conf ...
   wgnx-build:
     image: wgnx-e2e-client
     build: { context: ., dockerfile: Dockerfile.client }
@@ -108,7 +79,6 @@ services:
       - ..:/src:ro
       - ./state:/state
     environment:
-      WGNX_EXTRA_ROOT: /state/certs/ca.der
       RUST_LOG: ${RUST_LOG:-info}
     entrypoint: ["/src/target/linux/bin/wgnx-host"]
     cap_add: [NET_ADMIN]

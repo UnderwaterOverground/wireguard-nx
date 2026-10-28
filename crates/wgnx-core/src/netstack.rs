@@ -17,8 +17,8 @@ use smoltcp::wire::{HardwareAddress, IpAddress, IpCidr, IpEndpoint};
 
 use crate::time::Instant;
 
-/// Tailscale's tunnel MTU.
-pub const MTU: usize = 1280;
+/// WireGuard's default interface MTU; the engine sets the configured one.
+pub const DEFAULT_MTU: usize = 1420;
 
 // Overlay socket memory. On the Switch every byte comes out of the
 // sysmodule's fixed heap, shared with the engine and with every app's
@@ -119,6 +119,7 @@ pub struct Readiness {
 struct Queues {
     inbound: VecDeque<Vec<u8>>,
     outbound: VecDeque<Vec<u8>>,
+    mtu: usize,
 }
 
 impl Queues {
@@ -164,7 +165,7 @@ impl Device for Queues {
     fn capabilities(&self) -> DeviceCapabilities {
         let mut caps = DeviceCapabilities::default();
         caps.medium = Medium::Ip;
-        caps.max_transmission_unit = MTU;
+        caps.max_transmission_unit = self.mtu;
         caps
     }
 }
@@ -217,16 +218,14 @@ fn socket_addr(ep: IpEndpoint) -> SocketAddr {
 }
 
 impl Netstack {
-    pub fn new(now: Instant) -> Self {
-        let mut dev = Queues::default();
+    pub fn new(now: Instant, mtu: usize) -> Self {
+        let mut dev = Queues { mtu, ..Default::default() };
         let config = Config::new(HardwareAddress::Ip);
         let mut iface = Interface::new(config, &mut dev, smol_now(now));
         // Everything not on-link goes "out the tunnel"; with Medium::Ip the
         // gateway is never resolved, it only has to exist.
-        let _ = iface.routes_mut().add_default_ipv4_route(core::net::Ipv4Addr::new(100, 100, 100, 100));
-        let _ = iface
-            .routes_mut()
-            .add_default_ipv6_route(core::net::Ipv6Addr::new(0xfd7a, 0x115c, 0xa1e0, 0, 0, 0, 0x6464, 0x6464));
+        let _ = iface.routes_mut().add_default_ipv4_route(core::net::Ipv4Addr::new(192, 0, 2, 1));
+        let _ = iface.routes_mut().add_default_ipv6_route(core::net::Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1));
         Self {
             iface,
             sockets: SocketSet::new(Vec::new()),
@@ -244,7 +243,12 @@ impl Netstack {
         }
     }
 
-    /// Sets this node's tailnet addresses (from the netmap).
+    /// Sets the interface's MTU (packets built here are limited to it).
+    pub fn set_mtu(&mut self, mtu: usize) {
+        self.dev.mtu = mtu;
+    }
+
+    /// Sets this interface's addresses.
     pub fn set_addresses(&mut self, addrs: &[IpAddr]) {
         self.addrs = addrs.to_vec();
         self.iface.update_ip_addrs(|cidrs| {
@@ -402,7 +406,7 @@ impl Netstack {
     pub fn udp_send_to(&mut self, id: SockId, data: &[u8], dst: SocketAddr) -> Result<(), NetError> {
         let Some(Sock::Udp { port, .. }) = self.socks.get(&id) else { return Err(NetError::InvalidSocket) };
         let src = self.addrs.iter().copied().find(|a| a.is_ipv4() == dst.is_ipv4()).ok_or(NetError::Invalid)?;
-        let pkt = udp::build(SocketAddr::new(src, *port), dst, data, MTU).ok_or(NetError::Invalid)?;
+        let pkt = udp::build(SocketAddr::new(src, *port), dst, data, self.dev.mtu).ok_or(NetError::Invalid)?;
         if !self.dev.outbound_full() {
             self.dev.outbound.push_back(pkt);
         }
@@ -819,8 +823,8 @@ mod tests {
         let a_ip = IpAddr::V4(Ipv4Addr::new(100, 64, 0, 1));
         let b_ip = IpAddr::V4(Ipv4Addr::new(100, 64, 0, 2));
         let mut now = Instant::from_millis(0);
-        let mut a = Netstack::new(now);
-        let mut b = Netstack::new(now);
+        let mut a = Netstack::new(now, DEFAULT_MTU);
+        let mut b = Netstack::new(now, DEFAULT_MTU);
         a.set_addresses(&[a_ip]);
         b.set_addresses(&[b_ip]);
         let listener = b.tcp_listen(5201, 4).unwrap();
@@ -873,7 +877,7 @@ mod tests {
     /// --icmp` and plain ping rely on it).
     #[test]
     fn answers_icmp_echo() {
-        let mut net = Netstack::new(Instant::from_millis(0));
+        let mut net = Netstack::new(Instant::from_millis(0), DEFAULT_MTU);
         net.set_addresses(&[IpAddr::V4(Ipv4Addr::new(100, 64, 0, 4))]);
         // 100.64.0.1 -> 100.64.0.4 ICMP echo request, id 1 seq 1, no payload.
         let mut pkt = alloc::vec![
@@ -906,7 +910,7 @@ mod tests {
     fn outbound_queue_is_bounded() {
         let a_ip = IpAddr::V4(Ipv4Addr::new(100, 64, 0, 1));
         let b = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(100, 64, 0, 2)), 47998);
-        let mut net = Netstack::new(Instant::from_millis(0));
+        let mut net = Netstack::new(Instant::from_millis(0), DEFAULT_MTU);
         net.set_addresses(&[a_ip]);
         let udp = net.udp_bind(0).unwrap();
         for _ in 0..10 * OUT_PKTS {
@@ -927,8 +931,8 @@ mod tests {
         let a_ip = IpAddr::V4(Ipv4Addr::new(100, 64, 0, 1));
         let b_ip = IpAddr::V4(Ipv4Addr::new(100, 64, 0, 2));
         let mut now = Instant::from_millis(0);
-        let mut a = Netstack::new(now);
-        let mut b = Netstack::new(now);
+        let mut a = Netstack::new(now, DEFAULT_MTU);
+        let mut b = Netstack::new(now, DEFAULT_MTU);
         a.set_addresses(&[a_ip]);
         b.set_addresses(&[b_ip]);
 
@@ -980,14 +984,14 @@ mod tests {
     #[test]
     fn udp_checksums_are_valid() {
         use smoltcp::wire::{IpAddress, Ipv4Packet, Ipv6Packet, UdpPacket};
-        let v4 = udp::build("100.64.0.1:5000".parse().unwrap(), "100.64.0.2:53".parse().unwrap(), b"hello", MTU).unwrap();
+        let v4 = udp::build("100.64.0.1:5000".parse().unwrap(), "100.64.0.2:53".parse().unwrap(), b"hello", DEFAULT_MTU).unwrap();
         let ip = Ipv4Packet::new_checked(&v4[..]).unwrap();
         assert!(ip.verify_checksum());
         let u = UdpPacket::new_checked(ip.payload()).unwrap();
         assert!(u.verify_checksum(&IpAddress::Ipv4(ip.src_addr()), &IpAddress::Ipv4(ip.dst_addr())));
         assert_eq!(u.payload(), b"hello");
 
-        let v6 = udp::build("[fd7a:115c:a1e0::1]:5000".parse().unwrap(), "[fd7a:115c:a1e0::2]:7".parse().unwrap(), b"odd", MTU).unwrap();
+        let v6 = udp::build("[fd7a:115c:a1e0::1]:5000".parse().unwrap(), "[fd7a:115c:a1e0::2]:7".parse().unwrap(), b"odd", DEFAULT_MTU).unwrap();
         let ip = Ipv6Packet::new_checked(&v6[..]).unwrap();
         let u = UdpPacket::new_checked(ip.payload()).unwrap();
         assert!(u.verify_checksum(&IpAddress::Ipv6(ip.src_addr()), &IpAddress::Ipv6(ip.dst_addr())));
@@ -995,18 +999,18 @@ mod tests {
         let d = udp::parse(&v4).unwrap();
         assert_eq!(d.dst, "100.64.0.2:53".parse().unwrap());
         assert_eq!(&v4[d.payload], b"hello");
-        assert!(udp::build("100.64.0.1:1".parse().unwrap(), "100.64.0.2:1".parse().unwrap(), &[0; MTU], MTU).is_none());
+        assert!(udp::build("100.64.0.1:1".parse().unwrap(), "100.64.0.2:1".parse().unwrap(), &[0; DEFAULT_MTU], DEFAULT_MTU).is_none());
     }
 
     #[test]
     fn buffers_are_accounted_and_released() {
         let ip: IpAddr = "100.64.0.1".parse().unwrap();
-        let mut n = Netstack::new(Instant::from_nanos(0));
+        let mut n = Netstack::new(Instant::from_nanos(0), DEFAULT_MTU);
         n.set_addresses(&[ip]);
         let t = n.tcp_connect("100.64.0.2:80".parse().unwrap()).unwrap();
         assert_eq!(n.buffer_usage(), TCP_RX + TCP_TX);
         let u = n.udp_bind(9).unwrap();
-        let pkt = udp::build("100.64.0.2:1234".parse().unwrap(), SocketAddr::new(ip, 9), b"ping", MTU).unwrap();
+        let pkt = udp::build("100.64.0.2:1234".parse().unwrap(), SocketAddr::new(ip, 9), b"ping", DEFAULT_MTU).unwrap();
         n.inject(pkt);
         assert!(n.readiness(u).readable);
         assert!(n.buffer_usage() > TCP_RX + TCP_TX);
@@ -1043,7 +1047,7 @@ mod tests {
     fn closed_connection_frees_buffers_promptly() {
         let (a_ip, b_ip) = (IpAddr::V4(Ipv4Addr::new(100, 64, 0, 1)), IpAddr::V4(Ipv4Addr::new(100, 64, 0, 2)));
         let mut now = Instant::from_millis(0);
-        let (mut a, mut b) = (Netstack::new(now), Netstack::new(now));
+        let (mut a, mut b) = (Netstack::new(now, DEFAULT_MTU), Netstack::new(now, DEFAULT_MTU));
         a.set_addresses(&[a_ip]);
         b.set_addresses(&[b_ip]);
         let listener = b.tcp_listen(7, 4).unwrap();
@@ -1063,7 +1067,7 @@ mod tests {
     #[test]
     fn closing_sockets_give_way_to_new_ones() {
         let ip: IpAddr = "100.64.0.1".parse().unwrap();
-        let mut n = Netstack::new(Instant::from_nanos(0));
+        let mut n = Netstack::new(Instant::from_nanos(0), DEFAULT_MTU);
         n.set_addresses(&[ip]);
         let peer = |port| SocketAddr::new("100.64.0.2".parse().unwrap(), port);
         // Unanswered connects hold their buffers until the budget runs out.
@@ -1087,7 +1091,7 @@ mod tests {
     fn idle_listeners_hold_no_buffers() {
         let (a_ip, b_ip): (IpAddr, IpAddr) = ("100.64.0.1".parse().unwrap(), "100.64.0.2".parse().unwrap());
         let mut now = Instant::from_millis(0);
-        let (mut a, mut b) = (Netstack::new(now), Netstack::new(now));
+        let (mut a, mut b) = (Netstack::new(now, DEFAULT_MTU), Netstack::new(now, DEFAULT_MTU));
         a.set_addresses(&[a_ip]);
         b.set_addresses(&[b_ip]);
         let listener = b.tcp_listen(80, 4).unwrap();
@@ -1127,14 +1131,14 @@ mod tests {
     #[test]
     fn full_udp_queue_keeps_the_newest() {
         let ip: IpAddr = "100.64.0.1".parse().unwrap();
-        let mut n = Netstack::new(Instant::from_nanos(0));
+        let mut n = Netstack::new(Instant::from_nanos(0), DEFAULT_MTU);
         n.set_addresses(&[ip]);
         let u = n.udp_bind(9).unwrap();
         let mut sent = 0u32;
         // Far more than fits: the queue holds only the most recent ones.
         while sent < 2000 {
             let payload = sent.to_be_bytes();
-            n.inject(udp::build("100.64.0.2:1".parse().unwrap(), SocketAddr::new(ip, 9), &payload, MTU).unwrap());
+            n.inject(udp::build("100.64.0.2:1".parse().unwrap(), SocketAddr::new(ip, 9), &payload, DEFAULT_MTU).unwrap());
             sent += 1;
         }
         assert!(n.buffer_usage() <= UDP_RX);

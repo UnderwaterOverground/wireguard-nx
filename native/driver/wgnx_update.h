@@ -11,6 +11,7 @@ extern "C" {
 #endif
 
 // Where releases are published.
+#define WGNX_UPDATE_HOST "github.com"
 #define WGNX_UPDATE_REPO "UnderwaterOverground/wireguard-nx"
 
 typedef struct WgnxUpdate WgnxUpdate;

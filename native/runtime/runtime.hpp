@@ -4,7 +4,7 @@
 // mutex, which the engine thread drops only while blocked in poll(). Callers
 // that change engine state (overlay socket calls) get their I/O performed
 // immediately and wake the engine thread when its poll set or next deadline
-// changed (e.g. a new connection to the control server).
+// changed (e.g. a peer's endpoint became known).
 // Threads waiting for socket readiness block on a condition variable that
 // is signalled whenever the engine processed input.
 #pragma once
@@ -20,24 +20,12 @@
 
 #include "wgnx.h"
 #include "wgnx_driver.h"
-#include "wgnx_drop.h"
 
 namespace wgnx {
 
 struct RuntimeConfig {
-    std::string control_url;
-    std::string auth_key;
-    std::string hostname = "wireguard-nx";
-    std::string state_path;
-    std::string extra_root_path;  // optional DER root certificate
-    std::string connect_map;      // optional dev address rewrites
-    uint16_t udp_port = 0;
-    // Taildrop: save received files into this folder (empty = off).
-    std::string taildrop_dir;
-    uint16_t taildrop_port = 0;
-    // Use peers' subnet routes (the socket layer then sends them through
-    // the engine).
-    bool accept_routes = false;
+    std::string conf_path;  // the wg-quick style .conf
+    uint16_t udp_port = 0;  // 0: the conf's ListenPort, else any
     // Called on the engine thread with the lock held; must not call back in.
     std::function<void(const WgnxEvent &)> on_event;
 };
@@ -175,7 +163,6 @@ private:
     std::mutex gate_mu_;
     std::condition_variable gate_cv_;
     void WaitForLoop();
-    std::unique_ptr<WgnxDropDir> drop_;  // Taildrop folder state (Start())
 };
 
 }  // namespace wgnx

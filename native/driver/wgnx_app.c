@@ -5,7 +5,6 @@
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
 #include <strings.h>
 #include <sys/socket.h>
@@ -24,33 +23,6 @@ int wgnx_snprintf(char *dst, size_t size, const char *fmt, ...);
 
 // Hand-rolled parsing throughout: sscanf would pull newlib's whole scanf
 // (with float support) into the sysmodule.
-#ifndef WGNX_NO_STDIO  // key file helpers (state file)
-static void hex_encode(const uint8_t *in, size_t n, char *out) {
-    static const char digits[] = "0123456789abcdef";
-    for (size_t i = 0; i < n; i++) {
-        out[2 * i] = digits[in[i] >> 4];
-        out[2 * i + 1] = digits[in[i] & 15];
-    }
-    out[2 * n] = 0;
-}
-
-static int hex_nibble(char c) {
-    if (c >= '0' && c <= '9') return c - '0';
-    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
-    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
-    return -1;
-}
-
-static int hex_decode(const char *in, uint8_t *out, size_t n) {
-    for (size_t i = 0; i < n; i++) {
-        int hi = hex_nibble(in[2 * i]), lo = hi < 0 ? -1 : hex_nibble(in[2 * i + 1]);
-        if (lo < 0) return -1;
-        out[i] = (uint8_t)(hi << 4 | lo);
-    }
-    return 0;
-}
-#endif
-
 // Parses a decimal number of at most `max_digits`; returns the rest or NULL.
 static const char *parse_uint(const char *s, unsigned max_digits, unsigned *out) {
     unsigned v = 0, n = 0;
@@ -66,46 +38,6 @@ static const char *parse_uint(const char *s, unsigned max_digits, unsigned *out)
 static const char *expect(const char *s, char c) {
     return s && *s == c ? s + 1 : NULL;
 }
-
-#ifndef WGNX_NO_STDIO  // the sysmodule keeps its own state file (no newlib stdio)
-static int state_write(const char *path, const uint8_t machine[32], const uint8_t node[32], const uint8_t disco[32]) {
-    FILE *f = fopen(path, "w");
-    if (!f) return -1;
-    char hex[65];
-    hex_encode(machine, 32, hex);
-    fprintf(f, "machine=%s\n", hex);
-    hex_encode(node, 32, hex);
-    fprintf(f, "node=%s\n", hex);
-    hex_encode(disco, 32, hex);
-    fprintf(f, "disco=%s\n", hex);
-    return fclose(f) == 0 ? 0 : -1;
-}
-
-int wgnx_state_load_or_create(const char *path, uint8_t machine[32], uint8_t node[32], uint8_t disco[32]) {
-    int have = 0;
-    FILE *f = fopen(path, "r");
-    if (f) {
-        char line[160];
-        while (fgets(line, sizeof line, f)) {
-            if (!strncmp(line, "machine=", 8) && hex_decode(line + 8, machine, 32) == 0) have |= 1;
-            if (!strncmp(line, "node=", 5) && hex_decode(line + 5, node, 32) == 0) have |= 2;
-            if (!strncmp(line, "disco=", 6) && hex_decode(line + 6, disco, 32) == 0) have |= 4;
-        }
-        fclose(f);
-        if (have == 7) return 0;
-    }
-    if (!(have & 1)) wgnx_platform_random(machine, 32);
-    if (!(have & 2)) wgnx_platform_random(node, 32);
-    if (!(have & 4)) wgnx_platform_random(disco, 32);
-    return state_write(path, machine, node, disco);
-}
-
-int wgnx_state_set_node(const char *path, const uint8_t node[32]) {
-    uint8_t machine[32], old[32], disco[32];
-    if (wgnx_state_load_or_create(path, machine, old, disco) != 0) return -1;
-    return state_write(path, machine, node, disco);
-}
-#endif
 
 int wgnx_parse_ipv4(const char *s, uint16_t port, WgnxAddr *out) {
     unsigned a = 0, b = 0, c = 0, d = 0;
@@ -245,17 +177,9 @@ static uint64_t http_date(const char *host) {
     return t;
 }
 
-uint64_t wgnx_sane_unix_time(uint64_t system_unix, const char *control_url, bool *corrected) {
+uint64_t wgnx_sane_unix_time(uint64_t system_unix, const char *host, bool *corrected) {
     *corrected = false;
     if (plausible(system_unix)) return system_unix;
-    // Host part of the control URL.
-    char host[256];
-    const char *h = strstr(control_url, "://");
-    h = h ? h + 3 : control_url;
-    size_t len = strcspn(h, ":/");
-    if (len == 0 || len >= sizeof host) return 0;
-    memcpy(host, h, len);
-    host[len] = 0;
     uint64_t net = http_date(host);
     if (!plausible(net)) return 0;
     *corrected = true;
