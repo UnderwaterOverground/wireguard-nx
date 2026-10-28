@@ -736,7 +736,7 @@ namespace {
             ty += 28;
         };
         if (!g_status_ok) return;
-        if (g_status.flags & WGNX_CTL_FLAG_MITM) line("Homebrew apps can reach tunnel addresses.", White);
+        if (g_status.flags & WGNX_CTL_FLAG_MITM) line("Homebrew apps reach tunnel addresses.", White);
         if (g_status.flags & WGNX_CTL_FLAG_HOSTS) line("Peer names resolve (e.g. in Moonlight).", White);
         if (g_status.state == WGNX_CTL_PAUSED) line("Paused: tunnel connections fail until resumed.", Grey);
         if (g_status.memory_kb) {

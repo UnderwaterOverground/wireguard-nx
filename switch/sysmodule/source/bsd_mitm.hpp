@@ -1,7 +1,7 @@
-// bsd:u MITM: homebrew sockets that talk to tailnet addresses (100.64/10,
-// fd7a:115c:a1e0::/48) are served by the wgnx engine's overlay sockets via the
-// portable socket-virtualization layer (native/vsock); everything else is
-// forwarded to the real bsd:u untouched.
+// bsd:u MITM: homebrew sockets that talk to tunnel addresses (our own and
+// the peers' AllowedIPs, see VSock::IsTunnel) are served by the wgnx engine's
+// overlay sockets via the portable socket-virtualization layer (native/vsock);
+// everything else is forwarded to the real bsd:u untouched.
 #pragma once
 
 #include <stratosphere.hpp>
@@ -21,7 +21,7 @@ namespace ams::bsd_mitm {
     // Returns false, after logging why, if it cannot run safely.
     //
     // `sys_ftpd`: also serve sys-ftpd (a sysmodule, so not covered by the
-    // homebrew scope), making it reachable on the tailnet. It talks to bsd:s,
+    // homebrew scope), making it reachable on the tunnel. It talks to bsd:s,
     // which every system service shares, so that MITM gets its own threads
     // and matches sys-ftpd alone; sys-ftpd is restarted so its sessions,
     // opened at boot before us, come through the MITM.

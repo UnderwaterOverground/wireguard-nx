@@ -122,13 +122,14 @@ make nxlink-speedtest NXLINK_HOST=<switch ip> SPEEDTEST_SERVERS="<lan ip> <tunne
 # only some tests: SPEEDTEST_ARGS=+sc (b crypto, s SD card, c call costs, t TCP, u UDP)
 ```
 
-tailscale-nx 1.2.0, which this code comes from, measured (handheld on
-Wi-Fi, server on 2.5 GbE): on the LAN, TCP about 42 Mbit/s down and 50 up,
-and UDP without loss up to 30 Mbit/s down and 50 up; through its tunnel, UDP
-without loss up to 35 Mbit/s down and about 37 up. wireguard-nx's data path
-is the same (ChaCha20-Poly1305 in `ts_tunnel`, smoltcp), with a bigger MTU
-(1420 instead of 1280), so expect at least that; console figures go here
-once measured.
+Results (handheld on Wi-Fi, server on 2.5 GbE, Unraid's kernel WireGuard):
+on the LAN, TCP about 44 Mbit/s down and 54 up, and UDP without loss up to
+30 Mbit/s down and 50 up. Through the tunnel, UDP without loss up to
+35 Mbit/s down (10% lost at 40) and about 38 up; TCP about 17 down and
+13 up. tailscale-nx 1.2.0 on the same console managed 35 down / 37 up UDP
+through its tunnel and about 13 TCP each way, so the data path (the same
+ChaCha20-Poly1305 in `ts_tunnel` and smoltcp, with a 1420-byte MTU instead
+of 1280) is on par.
 
 ### A complete SD card tree
 

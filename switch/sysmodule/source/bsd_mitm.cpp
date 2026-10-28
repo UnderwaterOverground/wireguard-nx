@@ -190,7 +190,7 @@ namespace ams::bsd_mitm {
         // translates both for its callers); everything else matches libnx's
         // FreeBSD-derived headers.
         constexpr int WireEIO = 5;
-        constexpr int WireENetUnreach = 101;  // tailnet traffic while the user paused Tailscale
+        constexpr int WireENetUnreach = 101;  // tunnel traffic while the user paused Tailscale
         constexpr int WireNonBlock = 0x800;
         constexpr int WireENoBufs = 105;
 
@@ -575,7 +575,7 @@ namespace ams::bsd_mitm {
                 if (r.ret >= 0 && sa && ::wgnx::VSock::IsTunnel(sa)) {
                     char peer[64];
                     FormatAddr(sa, peer, sizeof peer);
-                    Log("bsd mitm: pid %lu accepted tailnet connection from %s on fd %d (new fd %d; %zu sockets tracked)", m_client_info.process_id.value, peer, fd,
+                    Log("bsd mitm: pid %lu accepted tunnel connection from %s on fd %d (new fd %d; %zu sockets tracked)", m_client_info.process_id.value, peer, fd,
                         static_cast<int>(r.ret), V()->Tracked());
                 }
                 R_RETURN(ReplyLogged("accept", fd, out_ret, out_errno, r));
@@ -589,14 +589,14 @@ namespace ams::bsd_mitm {
 
             Result Connect(sf::Out<s32> out_ret, sf::Out<s32> out_errno, s32 fd, const sf::InAutoSelectBuffer &addr) {
                 const sockaddr *sa = AddrIn(addr);
-                const bool tailnet = ::wgnx::VSock::IsTunnel(sa);
-                R_UNLESS(Known(fd) && sa != nullptr && (tailnet || Virtual(fd)), sm::mitm::ResultShouldForwardToSession());
-                if (tailnet && status::IsPaused()) R_RETURN(Reply(out_ret, out_errno, VResult{-1, WireENetUnreach}));
+                const bool tunnel = ::wgnx::VSock::IsTunnel(sa);
+                R_UNLESS(Known(fd) && sa != nullptr && (tunnel || Virtual(fd)), sm::mitm::ResultShouldForwardToSession());
+                if (tunnel && status::IsPaused()) R_RETURN(Reply(out_ret, out_errno, VResult{-1, WireENetUnreach}));
                 const VResult r = V()->Connect(fd, sa, static_cast<socklen_t>(addr.GetSize()));
-                if (tailnet) {
+                if (tunnel) {
                     char dst[64];
                     FormatAddr(sa, dst, sizeof dst);
-                    Log("bsd mitm: pid %lu fd %d connect to %s over the tailnet: %s (errno %d)", m_client_info.process_id.value, fd, dst,
+                    Log("bsd mitm: pid %lu fd %d connect to %s through the tunnel: %s (errno %d)", m_client_info.process_id.value, fd, dst,
                         r.ret >= 0 ? "ok" : "failed", r.ret < 0 ? r.err : 0);
                 }
                 R_RETURN(Reply(out_ret, out_errno, r));
@@ -629,7 +629,7 @@ namespace ams::bsd_mitm {
             Result Listen(sf::Out<s32> out_ret, sf::Out<s32> out_errno, s32 fd, s32 backlog) {
                 R_UNLESS(Known(fd), sm::mitm::ResultShouldForwardToSession());
                 const VResult r = V()->Listen(fd, backlog);
-                if (r.ret >= 0 && Virtual(fd)) Log("bsd mitm: pid %lu fd %d listening on the tailnet too", m_client_info.process_id.value, fd);
+                if (r.ret >= 0 && Virtual(fd)) Log("bsd mitm: pid %lu fd %d listening on the tunnel too", m_client_info.process_id.value, fd);
                 R_RETURN(ReplyLogged("listen", fd, out_ret, out_errno, r));
             }
 
@@ -894,20 +894,20 @@ namespace ams::bsd_mitm {
         // restart it so its new sessions come through us.
         void RestartSysFtpd() {
             if (R_FAILED(pmshellInitialize())) {
-                Log("bsd mitm: no pm:shell; restart sys-ftpd to reach it over the tailnet");
+                Log("bsd mitm: no pm:shell; restart sys-ftpd to reach it through the tunnel");
                 return;
             }
             u64 pid = 0;
             if (R_FAILED(pmshellGetProcessId(std::addressof(pid), SysFtpdProgramId)) || pid == 0) {
                 Log("bsd mitm: sys-ftpd not running; it will use the MITM when started");
             } else if (const Result rc = pmshellTerminateProgram(SysFtpdProgramId); R_FAILED(rc)) {
-                Log("bsd mitm: could not stop sys-ftpd (0x%x); restart it to reach it over the tailnet", rc.GetValue());
+                Log("bsd mitm: could not stop sys-ftpd (0x%x); restart it to reach it through the tunnel", rc.GetValue());
             } else {
                 const NcmProgramLocation loc = {.program_id = SysFtpdProgramId, .storageID = NcmStorageId_None};
                 for (int i = 0; i < 20; i++) {  // pm refuses while the old process is still going away
                     os::SleepThread(TimeSpan::FromMilliSeconds(100));
                     if (R_SUCCEEDED(pmshellLaunchProgram(0, std::addressof(loc), std::addressof(pid)))) {
-                        Log("bsd mitm: sys-ftpd restarted (pid %lu) to serve it on the tailnet", pid);
+                        Log("bsd mitm: sys-ftpd restarted (pid %lu) to serve it on the tunnel", pid);
                         pmshellExit();
                         return;
                     }
