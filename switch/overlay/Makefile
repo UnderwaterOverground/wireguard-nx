@@ -42,7 +42,7 @@ include $(DEVKITPRO)/libnx/switch_rules
 #---------------------------------------------------------------------------------
 APP_TITLE	:=	WireGuard
 APP_AUTHOR	:=	UnderwaterOverground
-APP_VERSION :=	1.2.0
+APP_VERSION :=	1.0.0
 
 TARGET		:=	wireguard-nx
 BUILD		:=	build
