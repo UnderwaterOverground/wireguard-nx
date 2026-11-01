@@ -845,10 +845,13 @@ mod reasm {
 
     use crate::time::Instant;
 
-    /// Datagrams reassembled at once; past this the oldest is evicted.
-    const MAX_ENTRIES: usize = 8;
+    /// Datagrams reassembled at once; past this the oldest is evicted. Sized
+    /// to absorb a sender's startup/keyframe burst, where many fragmented
+    /// packets are in flight at once (a too-small table evicts them
+    /// incomplete, and a stream's opening keyframe arrives broken).
+    const MAX_ENTRIES: usize = 128;
     /// Payload bytes buffered across all entries before the oldest is dropped.
-    const BUDGET: usize = 64 << 10;
+    const BUDGET: usize = 192 << 10;
     /// An incomplete datagram is discarded this long after its first fragment.
     const TIMEOUT: Duration = Duration::from_secs(5);
     /// An IPv4 packet (header + payload) can be no larger than this.
@@ -966,6 +969,12 @@ mod reasm {
                 if !more {
                     e.total = Some(end);
                 }
+                let grow = end.saturating_sub(e.data.len());
+                if grow > 0 && e.data.try_reserve(grow).is_err() {
+                    // Out of memory: abandon this datagram, don't abort.
+                    self.entries.swap_remove(idx);
+                    return None;
+                }
                 if e.data.len() < end {
                     e.data.resize(end, 0);
                 }
@@ -978,7 +987,14 @@ mod reasm {
                 let mut out = core::mem::take(&mut e.header);
                 out.extend_from_slice(&e.data[..total]);
                 self.entries.swap_remove(idx);
-                return Some(rebuild(out, total));
+                let pkt = rebuild(out, total);
+                // A mis-reassembled datagram (fragments aliased under a burst)
+                // would fail its UDP checksum; drop it rather than feed the app
+                // garbage, leaving the sender's FEC/retransmit to recover it.
+                if udp_cksum_bad(&pkt) {
+                    return None;
+                }
+                return Some(pkt);
             }
 
             // Hold the byte budget by dropping the oldest *other* datagrams.
@@ -1006,6 +1022,40 @@ mod reasm {
             self.entries.swap_remove(victim);
             true
         }
+    }
+
+    /// True if `pkt` is a UDP/IPv4 packet carrying a non-zero UDP checksum
+    /// that fails to verify. A zero checksum (verification disabled by the
+    /// sender) is accepted.
+    fn udp_cksum_bad(pkt: &[u8]) -> bool {
+        const PROTO_UDP: u8 = 17;
+        if pkt.len() < 20 || pkt[0] >> 4 != 4 || pkt[9] != PROTO_UDP {
+            return false;
+        }
+        let ihl = usize::from(pkt[0] & 0x0f) * 4;
+        if pkt.len() < ihl + 8 {
+            return false;
+        }
+        let udp = &pkt[ihl..];
+        if u16::from_be_bytes([udp[6], udp[7]]) == 0 {
+            return false; // checksum not in use
+        }
+        let mut acc = 0u32;
+        for c in pkt[12..20].chunks(2) {
+            acc += u32::from(u16::from_be_bytes([c[0], c[1]]));
+        }
+        acc += u32::from(PROTO_UDP) + udp.len() as u32; // pseudo-header
+        let mut chunks = udp.chunks_exact(2);
+        for c in &mut chunks {
+            acc += u32::from(u16::from_be_bytes([c[0], c[1]]));
+        }
+        if let [last] = chunks.remainder() {
+            acc += u32::from(*last) << 8;
+        }
+        while acc > 0xffff {
+            acc = (acc & 0xffff) + (acc >> 16);
+        }
+        (acc as u16) != 0xffff
     }
 
     /// Rebuilds a whole IPv4 packet from its reassembled header+payload:
@@ -1487,6 +1537,62 @@ mod tests {
             net.inject(f);
         }
         assert_eq!(recv_one(&mut net, sock).unwrap().0, payload);
+    }
+
+    /// Many distinct datagrams, their fragments fully interleaved (all first
+    /// fragments, then all second), still all reassemble — the table absorbs
+    /// a burst instead of evicting them incomplete.
+    #[test]
+    fn reassembles_interleaved_burst() {
+        let src = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(100, 64, 0, 1)), 48000);
+        let dst_ip = IpAddr::V4(Ipv4Addr::new(100, 64, 0, 2));
+        let mut net = Netstack::new(Instant::from_millis(0), DEFAULT_MTU);
+        net.set_addresses(&[dst_ip]);
+        let sock = net.udp_bind(47998).unwrap();
+        let n: u16 = 50;
+        let (mut firsts, mut seconds) = (Vec::new(), Vec::new());
+        for i in 0..n {
+            let payload: Vec<u8> = (0..2000u32).map(|x| (x + u32::from(i) * 7) as u8).collect();
+            let mut full = udp::build(src, SocketAddr::new(dst_ip, 47998), &payload, usize::MAX).unwrap();
+            full[4..6].copy_from_slice(&(i + 1).to_be_bytes()); // a distinct IP id
+            let frags = fragment(&full, 1400);
+            assert_eq!(frags.len(), 2);
+            firsts.push(frags[0].clone());
+            seconds.push(frags[1].clone());
+        }
+        // Hold every first fragment at once (stresses the table to 50 live
+        // entries), then complete and drain one at a time so the socket's own
+        // receive queue never overflows (that cap is tested elsewhere).
+        for f in firsts {
+            net.inject(f);
+        }
+        let mut got = 0;
+        for f in seconds {
+            net.inject(f);
+            if recv_one(&mut net, sock).is_some() {
+                got += 1;
+            }
+        }
+        assert_eq!(got, usize::from(n), "every interleaved datagram reassembled");
+    }
+
+    /// A datagram whose fragments carry corrupt bytes (a bad UDP checksum)
+    /// is dropped, never handed to the app.
+    #[test]
+    fn corrupt_reassembly_is_dropped() {
+        let src = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(100, 64, 0, 1)), 48000);
+        let dst_ip = IpAddr::V4(Ipv4Addr::new(100, 64, 0, 2));
+        let mut net = Netstack::new(Instant::from_millis(0), DEFAULT_MTU);
+        net.set_addresses(&[dst_ip]);
+        let sock = net.udp_bind(47998).unwrap();
+        let payload: Vec<u8> = (0..2000u32).map(|i| i as u8).collect();
+        let full = udp::build(src, SocketAddr::new(dst_ip, 47998), &payload, usize::MAX).unwrap();
+        let mut frags = fragment(&full, 1400);
+        frags[0][40] ^= 0xff; // flip a payload byte -> UDP checksum now wrong
+        for f in frags {
+            net.inject(f);
+        }
+        assert!(recv_one(&mut net, sock).is_none(), "corrupt datagram must be dropped");
     }
 
     /// A whole (unfragmented) datagram is untouched by the reassembly path.
