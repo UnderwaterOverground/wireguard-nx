@@ -196,6 +196,10 @@ pub struct Netstack {
     used: usize,
     /// Most overlay buffer bytes that may be allocated at once.
     budget: usize,
+    /// Rebuilds IPv4 datagrams that arrived fragmented (see `reasm`).
+    reasm: reasm::Reassembler,
+    /// The most recent time [`Self::poll`] saw, for ageing out fragments.
+    last_now: Instant,
 }
 
 fn random_ephemeral_port() -> u16 {
@@ -240,6 +244,8 @@ impl Netstack {
             addrs: Vec::new(),
             used: 0,
             budget: BUDGET,
+            reasm: reasm::Reassembler::new(),
+            last_now: now,
         }
     }
 
@@ -269,6 +275,17 @@ impl Netstack {
 
     /// Delivers an IP packet received from the tunnel.
     pub fn inject(&mut self, packet: Vec<u8>) {
+        // A fragment is held until its datagram is whole; smoltcp and the UDP
+        // parser both need the complete packet (Sunshine video, for one,
+        // exceeds the tunnel MTU and arrives fragmented).
+        let packet = if reasm::is_fragment(&packet) {
+            match self.reasm.accept(packet, self.last_now) {
+                Some(whole) => whole,
+                None => return,
+            }
+        } else {
+            packet
+        };
         if let Some(packet) = self.deliver_udp(packet) {
             if let Some(port) = self.syn_port(&packet) {
                 self.arm_listener(port);
@@ -304,6 +321,7 @@ impl Netstack {
 
     /// Runs the stack. Returns true if socket state may have changed.
     pub fn poll(&mut self, now: Instant) -> bool {
+        self.last_now = now;
         let changed = self.iface.poll(smol_now(now), &mut self.dev, &mut self.sockets)
             != smoltcp::iface::PollResult::None;
         self.service_listeners();
@@ -811,6 +829,235 @@ mod udp {
     }
 }
 
+/// IPv4 fragment reassembly.
+///
+/// The UDP fast path ([`udp::parse`]) and smoltcp both need a whole datagram.
+/// A sender whose path to us crosses a smaller MTU than the tunnel's (Sunshine
+/// sends video packets larger than the WireGuard MTU, for one) fragments the
+/// inner IP packet; without reassembly every fragment is dropped and, e.g.,
+/// Moonlight never receives video. We rebuild the original packet here before
+/// delivery. Bounded in entries, bytes and age so a lost tail or a flood can't
+/// grow the fixed heap. IPv6 has no in-header fragmentation, so this is v4
+/// only; the engine's underlay is v4 regardless.
+mod reasm {
+    use alloc::vec::Vec;
+    use core::time::Duration;
+
+    use crate::time::Instant;
+
+    /// Datagrams reassembled at once; past this the oldest is evicted.
+    const MAX_ENTRIES: usize = 8;
+    /// Payload bytes buffered across all entries before the oldest is dropped.
+    const BUDGET: usize = 64 << 10;
+    /// An incomplete datagram is discarded this long after its first fragment.
+    const TIMEOUT: Duration = Duration::from_secs(5);
+    /// An IPv4 packet (header + payload) can be no larger than this.
+    const IP_MAX: usize = u16::MAX as usize;
+
+    #[derive(PartialEq, Eq, Clone, Copy)]
+    struct Key {
+        src: [u8; 4],
+        dst: [u8; 4],
+        id: u16,
+        proto: u8,
+    }
+
+    struct Entry {
+        key: Key,
+        /// IP header (IHL bytes) from the offset-0 fragment; empty until seen.
+        header: Vec<u8>,
+        /// Payload, each fragment written at its offset.
+        data: Vec<u8>,
+        /// Covered payload byte ranges, kept merged and sorted.
+        have: Vec<(usize, usize)>,
+        /// Payload length, known once the last fragment (MF=0) is in.
+        total: Option<usize>,
+        /// Monotonic time this datagram is abandoned at.
+        deadline: Instant,
+    }
+
+    impl Entry {
+        fn bytes(&self) -> usize {
+            self.header.len() + self.data.len()
+        }
+        /// The payload length if every byte [0, total) has arrived with a
+        /// header, else `None`.
+        fn complete(&self) -> Option<usize> {
+            let total = self.total?;
+            (!self.header.is_empty() && self.have.as_slice() == [(0, total)]).then_some(total)
+        }
+    }
+
+    pub struct Reassembler {
+        entries: Vec<Entry>,
+    }
+
+    /// True if `p` is an IPv4 fragment (more-fragments set, or a non-zero
+    /// offset): the only packets [`Reassembler::accept`] should be given.
+    pub fn is_fragment(p: &[u8]) -> bool {
+        p.len() >= 20 && p[0] >> 4 == 4 && u16::from_be_bytes([p[6], p[7]]) & 0x3fff != 0
+    }
+
+    impl Reassembler {
+        pub fn new() -> Self {
+            Self { entries: Vec::new() }
+        }
+
+        fn used(&self) -> usize {
+            self.entries.iter().map(Entry::bytes).sum()
+        }
+
+        /// Drops datagrams whose deadline has passed.
+        fn expire(&mut self, now: Instant) {
+            self.entries.retain(|e| e.deadline.as_nanos() > now.as_nanos());
+        }
+
+        /// Takes one IPv4 fragment (as classified by [`is_fragment`]). Returns
+        /// the rebuilt packet once the last hole is filled, else `None`.
+        pub fn accept(&mut self, p: Vec<u8>, now: Instant) -> Option<Vec<u8>> {
+            self.expire(now);
+
+            let ihl = usize::from(p[0] & 0x0f) * 4;
+            let total_len = usize::from(u16::from_be_bytes([p[2], p[3]]));
+            let frag = u16::from_be_bytes([p[6], p[7]]);
+            let more = frag & 0x2000 != 0;
+            let offset = usize::from(frag & 0x1fff) * 8;
+            // Trust the IP total-length field, but never read past the buffer.
+            if ihl < 20 || total_len < ihl || total_len > p.len() {
+                return None;
+            }
+            let payload_len = total_len - ihl;
+            let end = offset + payload_len;
+            // A non-final fragment with no payload, or one that would overflow
+            // an IP packet, is bogus.
+            if (more && payload_len == 0) || end + ihl > IP_MAX {
+                return None;
+            }
+            let key = Key {
+                src: p[12..16].try_into().unwrap(),
+                dst: p[16..20].try_into().unwrap(),
+                id: u16::from_be_bytes([p[4], p[5]]),
+                proto: p[9],
+            };
+
+            let idx = match self.entries.iter().position(|e| e.key == key) {
+                Some(i) => i,
+                None => {
+                    if self.entries.len() >= MAX_ENTRIES {
+                        self.evict_oldest(key);
+                    }
+                    self.entries.push(Entry {
+                        key,
+                        header: Vec::new(),
+                        data: Vec::new(),
+                        have: Vec::new(),
+                        total: None,
+                        deadline: now + TIMEOUT,
+                    });
+                    self.entries.len() - 1
+                }
+            };
+
+            {
+                let e = &mut self.entries[idx];
+                if offset == 0 && e.header.is_empty() {
+                    e.header = p[..ihl].to_vec();
+                }
+                if !more {
+                    e.total = Some(end);
+                }
+                if e.data.len() < end {
+                    e.data.resize(end, 0);
+                }
+                e.data[offset..end].copy_from_slice(&p[ihl..total_len]);
+                insert_range(&mut e.have, offset, end);
+            }
+
+            if let Some(total) = self.entries[idx].complete() {
+                let e = &mut self.entries[idx];
+                let mut out = core::mem::take(&mut e.header);
+                out.extend_from_slice(&e.data[..total]);
+                self.entries.swap_remove(idx);
+                return Some(rebuild(out, total));
+            }
+
+            // Hold the byte budget by dropping the oldest *other* datagrams.
+            while self.used() > BUDGET {
+                if !self.evict_oldest(key) {
+                    break;
+                }
+            }
+            None
+        }
+
+        /// Removes the entry nearest its deadline whose key is not `keep`.
+        /// Returns false if none qualifies.
+        fn evict_oldest(&mut self, keep: Key) -> bool {
+            let Some(victim) = self
+                .entries
+                .iter()
+                .enumerate()
+                .filter(|(_, e)| e.key != keep)
+                .min_by_key(|(_, e)| e.deadline.as_nanos())
+                .map(|(i, _)| i)
+            else {
+                return false;
+            };
+            self.entries.swap_remove(victim);
+            true
+        }
+    }
+
+    /// Rebuilds a whole IPv4 packet from its reassembled header+payload:
+    /// `pkt` is the IHL-byte header followed by `payload_total` payload bytes.
+    /// Fixes total length, clears the fragment fields and recomputes the
+    /// header checksum.
+    fn rebuild(mut pkt: Vec<u8>, payload_total: usize) -> Vec<u8> {
+        let ihl = pkt.len() - payload_total;
+        let total = pkt.len() as u16;
+        pkt[2..4].copy_from_slice(&total.to_be_bytes());
+        pkt[6] = 0;
+        pkt[7] = 0;
+        pkt[10] = 0;
+        pkt[11] = 0;
+        let sum = header_checksum(&pkt[..ihl]);
+        pkt[10..12].copy_from_slice(&sum.to_be_bytes());
+        pkt
+    }
+
+    fn header_checksum(h: &[u8]) -> u16 {
+        let mut acc = 0u32;
+        let mut chunks = h.chunks_exact(2);
+        for c in &mut chunks {
+            acc += u32::from(u16::from_be_bytes([c[0], c[1]]));
+        }
+        if let [last] = chunks.remainder() {
+            acc += u32::from(*last) << 8;
+        }
+        while acc > 0xffff {
+            acc = (acc & 0xffff) + (acc >> 16);
+        }
+        !(acc as u16)
+    }
+
+    /// Inserts `[start, end)` into a sorted, merged range set.
+    fn insert_range(ranges: &mut Vec<(usize, usize)>, start: usize, end: usize) {
+        if start >= end {
+            return;
+        }
+        ranges.push((start, end));
+        ranges.sort_unstable();
+        let mut merged: Vec<(usize, usize)> = Vec::with_capacity(ranges.len());
+        for &(s, e) in ranges.iter() {
+            match merged.last_mut() {
+                Some(last) if s <= last.1 => last.1 = last.1.max(e),
+                _ => merged.push((s, e)),
+            }
+        }
+        *ranges = merged;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1149,5 +1396,110 @@ mod tests {
         }
         assert_eq!(last, Some(1999), "the newest datagram survives");
         assert_eq!(n.buffer_usage(), 0);
+    }
+
+    /// Splits a complete IPv4/UDP packet into `chunk`-sized IP fragments
+    /// (each but the last a multiple of 8 payload bytes).
+    fn fragment(full: &[u8], chunk: usize) -> Vec<Vec<u8>> {
+        let ihl = 20usize;
+        let body = &full[ihl..];
+        let mut out = Vec::new();
+        let mut off = 0;
+        while off < body.len() {
+            let len = chunk.min(body.len() - off);
+            let more = off + len < body.len();
+            let mut f = full[..ihl].to_vec();
+            f[2..4].copy_from_slice(&((ihl + len) as u16).to_be_bytes());
+            let frag = ((off / 8) as u16) | if more { 0x2000 } else { 0 };
+            f[6..8].copy_from_slice(&frag.to_be_bytes());
+            f.extend_from_slice(&body[off..off + len]);
+            out.push(f);
+            off += len;
+        }
+        out
+    }
+
+    fn recv_one(net: &mut Netstack, sock: SockId) -> Option<(Vec<u8>, SocketAddr)> {
+        let mut buf = [0u8; 8192];
+        net.udp_recv_from(sock, &mut buf).ok().map(|(n, from)| (buf[..n].to_vec(), from))
+    }
+
+    /// A datagram larger than the tunnel MTU arrives in fragments and is
+    /// reassembled and delivered whole (the Moonlight video case).
+    #[test]
+    fn reassembles_fragmented_udp() {
+        let src = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(100, 64, 0, 1)), 48000);
+        let dst_ip = IpAddr::V4(Ipv4Addr::new(100, 64, 0, 2));
+        let mut net = Netstack::new(Instant::from_millis(0), DEFAULT_MTU);
+        net.set_addresses(&[dst_ip]);
+        let sock = net.udp_bind(47998).unwrap();
+        let payload: Vec<u8> = (0..3000u32).map(|i| i as u8).collect();
+        // Build past the MTU cap (usize::MAX): a real sender just fragments it.
+        let full = udp::build(src, SocketAddr::new(dst_ip, 47998), &payload, usize::MAX).unwrap();
+        let frags = fragment(&full, 1400);
+        assert_eq!(frags.len(), 3, "3000 bytes over 1400 = three fragments");
+        for f in &frags {
+            assert!(super::reasm::is_fragment(f));
+            net.inject(f.clone());
+        }
+        let (got, from) = recv_one(&mut net, sock).expect("datagram delivered");
+        assert_eq!(got, payload);
+        assert_eq!(from, src);
+    }
+
+    /// Fragments reassemble regardless of arrival order.
+    #[test]
+    fn reassembles_out_of_order() {
+        let src = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(100, 64, 0, 1)), 48000);
+        let dst_ip = IpAddr::V4(Ipv4Addr::new(100, 64, 0, 2));
+        let mut net = Netstack::new(Instant::from_millis(0), DEFAULT_MTU);
+        net.set_addresses(&[dst_ip]);
+        let sock = net.udp_bind(47998).unwrap();
+        let payload: Vec<u8> = (0..2600u32).map(|i| (i * 7) as u8).collect();
+        let full = udp::build(src, SocketAddr::new(dst_ip, 47998), &payload, usize::MAX).unwrap();
+        let mut frags = fragment(&full, 1024);
+        frags.reverse();
+        for f in frags {
+            net.inject(f);
+        }
+        assert_eq!(recv_one(&mut net, sock).unwrap().0, payload);
+    }
+
+    /// A missing fragment never delivers a partial datagram, and a stale
+    /// partial is aged out without blocking a later, whole one.
+    #[test]
+    fn incomplete_is_not_delivered() {
+        let src = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(100, 64, 0, 1)), 48000);
+        let dst_ip = IpAddr::V4(Ipv4Addr::new(100, 64, 0, 2));
+        let mut net = Netstack::new(Instant::from_millis(0), DEFAULT_MTU);
+        net.set_addresses(&[dst_ip]);
+        let sock = net.udp_bind(47998).unwrap();
+        let payload: Vec<u8> = (0..3000u32).map(|i| i as u8).collect();
+        let full = udp::build(src, SocketAddr::new(dst_ip, 47998), &payload, usize::MAX).unwrap();
+        let frags = fragment(&full, 1400);
+        // Drop the middle fragment.
+        net.inject(frags[0].clone());
+        net.inject(frags[2].clone());
+        assert!(recv_one(&mut net, sock).is_none(), "no partial delivery");
+        // Age the partial out, then send a fresh whole datagram.
+        net.poll(Instant::from_millis(10_000));
+        for f in fragment(&full, 1400) {
+            net.inject(f);
+        }
+        assert_eq!(recv_one(&mut net, sock).unwrap().0, payload);
+    }
+
+    /// A whole (unfragmented) datagram is untouched by the reassembly path.
+    #[test]
+    fn whole_datagram_passes_through() {
+        let src = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(100, 64, 0, 1)), 48000);
+        let dst_ip = IpAddr::V4(Ipv4Addr::new(100, 64, 0, 2));
+        let mut net = Netstack::new(Instant::from_millis(0), DEFAULT_MTU);
+        net.set_addresses(&[dst_ip]);
+        let sock = net.udp_bind(47998).unwrap();
+        let pkt = udp::build(src, SocketAddr::new(dst_ip, 47998), b"hello", DEFAULT_MTU).unwrap();
+        assert!(!super::reasm::is_fragment(&pkt));
+        net.inject(pkt);
+        assert_eq!(recv_one(&mut net, sock).unwrap().0, b"hello");
     }
 }
