@@ -171,14 +171,30 @@ several configurations, all the settings, sys-ftpd and more.
 
 Add your PC in Moonlight by its peer name (e.g. `gaming-pc`) or by an
 address the tunnel reaches (its address on your home network, if the server
-routes that network, or the server's tunnel address if the PC is the
-server). At home, Moonlight may find the PC on the local network and use
-that instead, which is fine. Away from home, it uses the tunnel.
+routes that network). At home, Moonlight may find the PC on the local
+network and use that instead, which is fine. Away from home, it uses the
+tunnel.
 
-Streams stay smooth up to about 25 Mbit/s at 720p or 1080p, close to what
-the Switch's Wi-Fi manages on its own. If a stream stutters at a higher
-bitrate, turn it down in Moonlight's settings. Artemis picks 35 Mbit/s for
-1080p, so lower it to around 25.
+Use the peer name if you can. Our testing found these bitrates safe, at
+60 FPS with a worst-case picture (full-screen moving noise):
+
+| Resolution | PC added by its peer name | PC added by a `10.x`, `172.16.x` to `172.31.x` or `192.168.x` address |
+|---|---|---|
+| 720p | up to 25 Mbit/s | up to 20 Mbit/s |
+| 1080p | up to 20 Mbit/s | not recommended: use 720p |
+
+The name matters because Moonlight sends bigger video packets to addresses
+that look local. Those are too big to go through the tunnel whole, so each
+one is split in two, which doubles the work for the Switch. A peer name
+leads Moonlight to a stand-in address instead (`100.127.0.1` for
+`10.253.0.1`: the last two numbers are kept), which it treats as remote,
+so it sends packets that fit, and wireguard-nx swaps the real address in
+on the way out. Only peers have names, so this works when the PC is the
+WireGuard server or one of its peers, not for a PC elsewhere on the
+server's home network.
+
+Set the bitrate in Moonlight's settings. Artemis picks 35 Mbit/s for 1080p,
+so lower it to 20.
 
 ## Several configurations
 
@@ -224,6 +240,10 @@ stream.** That's a Moonlight-Switch bug
 ([#306](https://github.com/XITRIX/Moonlight-Switch/issues/306)), and it
 happens with wireguard-nx turned off too. Until it's fixed, end the stream
 before putting the console to sleep.
+
+**Artemis won't open a second time.** After a stream, Artemis can't start
+again from the same hbmenu session, with or without wireguard-nx. Close
+hbmenu from the HOME menu and open it again.
 
 **Is my traffic private?** Traffic to the addresses in your configuration
 is encrypted end to end with WireGuard, between the Switch and your server.

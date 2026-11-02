@@ -96,6 +96,14 @@ and anyone with it can join your network as the Switch.
 - **Peer names:** names from the `.conf` are written into the hosts file
   Atmosphère is using (`atmosphere/hosts/emummc.txt`, `sysmmc.txt` or
   `default.txt`), pointing at each peer's first `/32` in `AllowedIPs`.
+  - A private address (`10.x`, `172.16.x` to `172.31.x`, `192.168.x`) is
+    written as a stand-in in `100.127.0.0/16` with the same last two
+    numbers (`10.253.0.1` becomes `100.127.0.1`), so Moonlight sends video
+    packets that fit the tunnel (see the
+    [README](../README.md#using-it-with-moonlight)). Homebrew reaching the
+    stand-in reaches the real address, and sees the stand-in as the other
+    end. Other programs don't use the tunnel, so they're unaffected.
+    `aliases=off` in `config.ini` writes the real addresses instead.
   - Atmosphère's Nintendo blocking is left alone, and names containing
     "nintendo" are never added.
   - If there's no hosts file, names stay off. wireguard-nx never creates
@@ -159,6 +167,7 @@ Config page switches `.conf` files at once).
 |---|---|---|
 | `conf` | the only `.conf` there is, else `wg0.conf` | Which `.conf` in `config/wireguard-nx` to use |
 | `hosts` | `on` | `off` stops writing peer names to the hosts file |
+| `aliases` | `on` | `off` writes peers' real private addresses to the hosts file, not stand-ins (see [Using it](#using-it)) |
 | `connect_notice` | `on` | `off` turns off the "Connected" toast at boot (as does the overlay switch) |
 | `update_check` | `on` | `off` stops checking GitHub for a newer release at boot (as does the overlay switch) |
 | `mitm` | `homebrew` | Which programs can reach the tunnel: `homebrew`, `off`, or `homebrew,sys-ftpd` (see below) |
@@ -274,6 +283,12 @@ limit.
   - To watch it live, set `log_udp` to a computer's address.
 - **An app reports "no buffer space" (errno 105).**
   - All apps share the tunnel socket memory. Raise `overlay_budget_kb`.
+- **Moonlight is slow or choppy away from home.**
+  - Check Moonlight's bitrate is within the
+    [limits we found safe](../README.md#using-it-with-moonlight), and that
+    the PC is added by its peer name: a PC added by a local-network
+    address (`10.x`, `172.16.x` to `172.31.x`, `192.168.x`) is only safe up
+    to 20 Mbit/s at 720p.
 - **Moonlight finds the PC at home but not away.**
   - Check that Moonlight's saved host includes the peer name or a tunnel
     address, that `AllowedIPs` covers the PC's address, and that the overlay

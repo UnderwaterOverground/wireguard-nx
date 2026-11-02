@@ -21,6 +21,11 @@
 # Peer names from the .conf into Atmosphere's hosts file, so apps can use
 # them (off: addresses only).
 # hosts=on
+# Peers at private addresses (10.x, 172.16-31.x, 192.168.x) are named by a
+# stand-in in 100.127.0.0/16 with the same last two numbers, so Moonlight
+# sends video packets that fit the tunnel; homebrew connecting to it reaches
+# the real address (off: name the real addresses).
+# aliases=on
 # Memory for tunnel sockets, shared by all apps (KB, 128-384, default 320).
 # TCP connections get smaller buffers as it fills, so about 17 fit at once by
 # default; raise it only if apps report "no buffer space" (errno 105). It

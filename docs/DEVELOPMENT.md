@@ -131,6 +131,39 @@ through its tunnel and about 13 TCP each way, so the data path (the same
 ChaCha20-Poly1305 in `ts_tunnel` and smoltcp, with a 1420-byte MTU instead
 of 1280) is on par.
 
+### Moonlight stream test
+
+The bitrate limits in the README come from streaming the hardest picture
+there is for a video encoder, full-screen moving noise, from Sunshine to
+Artemis for two minutes per setting. Start the stream first, then the
+noise on the host, so it's on top of everything (Steam Big Picture covers
+noise started earlier):
+
+```sh
+ffplay -f lavfi -i 'nullsrc=s=1920x1080:r=60,geq=random(1)*255:128:128' -fs
+```
+
+A setting counts as safe when Artemis's **Performance** page (MINUS + PLUS
+during a stream) holds about 60 FPS and Sunshine's log, at
+`min_log_level = debug`, shows no more than an occasional
+`IDX_REQUEST_IDR_FRAME` (Moonlight asking for a fresh frame after a loss).
+Noise makes the encoder go over the set bitrate: 25 Mbit/s put about 26
+through the tunnel at 720p and 33 at 1080p.
+
+Moonlight sends 1392-byte video packets to hosts at private addresses and
+1024-byte packets to everything else, including `100.64.0.0/10`
+(`moonlight-common-c`, `Connection.c`). With the 1420-byte tunnel MTU a
+1392-byte packet arrives as two fragments, so the Switch receives twice
+the datagrams. The limit is the console's socket service, which runs on
+core 3 and was 84 to 96% busy at the edge: about 3,300 to 4,000
+datagrams a second, however the sysmodule reads them. That's why peer
+names resolve to stand-ins in `100.127.0.0/16` (`VSock::SetAliases`,
+`hosts.cpp`). Moonlight's remote mode also takes 500 kbit/s off the
+video bitrate for audio and turns off DSCP marking, which a tunnel
+doesn't carry anyway. tailscale-nx 1.2.0 on the same console, with the
+PC at its `100.x` address, had the same limits as wireguard-nx by peer
+name.
+
 ### A complete SD card tree
 
 `tools/stage-sd.sh` stages `dist/sd/`: Atmosphère 1.12.0, hekate, the
