@@ -4,7 +4,9 @@
 #
 # The tunnel itself is a wg-quick style file next to this one, e.g. wg0.conf,
 # as any WireGuard server hands out. A "# Name = gaming-pc" comment under a
-# [Peer] names it in the overlay and lets Moonlight find it by that name.
+# [Peer] names it in the overlay and lets Moonlight find it by that name;
+# "# Host = gaming-pc 192.168.1.50" anywhere in it names another address the
+# tunnel reaches, such as a PC on the server's home network.
 #
 # Which .conf to use. Default: the only one in this folder, else wg0.conf.
 # conf=wg0.conf

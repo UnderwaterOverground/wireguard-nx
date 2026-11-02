@@ -175,23 +175,30 @@ routes that network). At home, Moonlight may find the PC on the local
 network and use that instead, which is fine. Away from home, it uses the
 tunnel.
 
-Use the peer name if you can. Our testing found these bitrates safe, at
-60 FPS with a worst-case picture (full-screen moving noise):
+Use a name if you can. Our testing found these bitrates safe, at 60 FPS
+with a worst-case picture (full-screen moving noise):
 
-| Resolution | PC added by its peer name | PC added by a `10.x`, `172.16.x` to `172.31.x` or `192.168.x` address |
+| Resolution | PC added by name | PC added by a `10.x`, `172.16.x` to `172.31.x` or `192.168.x` address |
 |---|---|---|
 | 720p | up to 25 Mbit/s | up to 20 Mbit/s |
 | 1080p | up to 20 Mbit/s | not recommended: use 720p |
 
 The name matters because Moonlight sends bigger video packets to addresses
 that look local. Those are too big to go through the tunnel whole, so each
-one is split in two, which doubles the work for the Switch. A peer name
-leads Moonlight to a stand-in address instead (`100.127.0.1` for
-`10.253.0.1`: the last two numbers are kept), which it treats as remote,
-so it sends packets that fit, and wireguard-nx swaps the real address in
-on the way out. Only peers have names, so this works when the PC is the
-WireGuard server or one of its peers, not for a PC elsewhere on the
-server's home network.
+one is split in two, which doubles the work for the Switch. A name leads
+Moonlight to a stand-in address instead (`100.127.0.1` for `10.253.0.1`:
+the last two numbers are kept), which it treats as remote, so it sends
+packets that fit, and wireguard-nx swaps the real address in on the way
+out.
+
+Peers are named by their `# Name = ...` comment. To name a PC elsewhere on
+the server's home network, add a line like this anywhere in the `.conf`
+(its address must be inside a peer's `AllowedIPs`), and add the PC in
+Moonlight as `gaming-pc`:
+
+```ini
+# Host = gaming-pc 192.168.1.50
+```
 
 Set the bitrate in Moonlight's settings. Artemis picks 35 Mbit/s for 1080p,
 so lower it to 20.

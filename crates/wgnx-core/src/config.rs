@@ -9,12 +9,17 @@
 //! it: `# Name = gaming-pc` (also `# Name: x`, wg-easy's `### Client: x`,
 //! and a bare `#gaming-pc` line as Unraid writes). Names end up in the
 //! overlay and in the console's hosts file.
+//!
+//! `# Host = gaming-pc 192.168.1.50`, anywhere in the file, names another
+//! address the tunnel reaches (a PC on the server's network) for the hosts
+//! file. A malformed one is logged and ignored, never an error: other tools'
+//! comments may start with "Host" too.
 
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::fmt;
-use core::net::IpAddr;
+use core::net::{IpAddr, Ipv4Addr};
 
 use base64::Engine as _;
 
@@ -27,6 +32,8 @@ pub const NAME_MAX: usize = 31;
 pub struct WgConfig {
     pub interface: Interface,
     pub peers: Vec<PeerConf>,
+    /// From `# Host = name a.b.c.d` comments, in file order.
+    pub hosts: Vec<(String, Ipv4Addr)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -147,6 +154,7 @@ pub fn parse(text: &str) -> Result<WgConfig, ParseError> {
     let mut section = Section::None;
     let mut iface: Option<InterfaceBuilder> = None;
     let mut peers: Vec<PeerBuilder> = Vec::new();
+    let mut hosts: Vec<(String, Ipv4Addr)> = Vec::new();
 
     for (idx, raw) in text.lines().enumerate() {
         let line_no = idx + 1;
@@ -155,6 +163,19 @@ pub fn parse(text: &str) -> Result<WgConfig, ParseError> {
             continue;
         }
         if let Some(comment) = line.strip_prefix('#') {
+            match host_from_comment(comment) {
+                Some(Ok(host)) => {
+                    if !hosts.iter().any(|(n, _)| *n == host.0) {
+                        hosts.push(host);
+                    }
+                    continue;
+                }
+                Some(Err(())) => {
+                    log::warn!("conf line {line_no}: ignoring Host comment (expected \"# Host = name a.b.c.d\")");
+                    continue;
+                }
+                None => {}
+            }
             let (explicit, implied) = name_from_comment(comment);
             match section {
                 Section::Interface => {
@@ -310,7 +331,37 @@ pub fn parse(text: &str) -> Result<WgConfig, ParseError> {
             name: iface.name.or(iface.implied_name).map(|n| normalize_name(&n)).filter(|n| !n.is_empty()),
         },
         peers: out_peers,
+        hosts,
     })
+}
+
+/// A `Host = name a.b.c.d` (or `Host: ...`) comment: None if the comment
+/// isn't one, Err if it is but doesn't hold a name and an IPv4 address.
+fn host_from_comment(comment: &str) -> Option<Result<(String, Ipv4Addr), ()>> {
+    let text = comment.trim_start_matches('#').trim();
+    if !text.get(..4).is_some_and(|w| w.eq_ignore_ascii_case("host")) {
+        return None;
+    }
+    let rest = text[4..].trim_start();
+    let rest = rest.strip_prefix('=').or_else(|| rest.strip_prefix(':'))?;
+    // The address first or last; the rest is the name ("Gaming PC" too).
+    let rest = rest.trim();
+    let (first, last) = (rest.split_whitespace().next()?, rest.split_whitespace().last()?);
+    let (name, ip) = if let Ok(ip) = last.parse::<Ipv4Addr>() {
+        (rest[..rest.len() - last.len()].trim(), ip)
+    } else if let Ok(ip) = first.parse::<Ipv4Addr>() {
+        (rest[first.len()..].trim(), ip)
+    } else {
+        return Some(Err(()));
+    };
+    if name.parse::<Ipv4Addr>().is_ok() {
+        return Some(Err(()));
+    }
+    let name = normalize_name(name);
+    if name.is_empty() {
+        return Some(Err(()));
+    }
+    Some(Ok((name, ip)))
 }
 
 /// The name a comment line gives its section: (explicit, implied).
@@ -444,6 +495,24 @@ mod tests {
         assert_eq!(c.peers[2].endpoint, Some((EndpointHost::Name("test.wireguard.com".into()), 18981)));
         assert_eq!(c.peers[2].ipv4(), Some("10.10.10.230".parse().unwrap()));
         assert_eq!(c.peers[0].persistent_keepalive, None);
+    }
+
+    #[test]
+    fn host_comments_name_other_addresses() {
+        let text = format!(
+            "# Host = Gaming PC 192.168.1.50\n[Interface]\nPrivateKey = {KEY_A}\nAddress = 10.0.0.2/32\n#host: 192.168.1.60 nas\n[Peer]\n# Name = router\n#Hostname\n# Host: my home server\n# Host = nas 192.168.1.61\n# Hosts = a 1.2.3.4\nPublicKey = {KEY_B}\nAllowedIPs = 10.0.0.1, 192.168.1.0/24\n"
+        );
+        let c = parse(&text).unwrap();
+        // "my home server" has no address: ignored. The first "nas" wins.
+        assert_eq!(c.hosts, [("gaming-pc".to_string(), "192.168.1.50".parse().unwrap()), ("nas".to_string(), "192.168.1.60".parse().unwrap())]);
+        assert_eq!(c.peers[0].name, "router");
+        let text = format!("[Interface]\nPrivateKey = {KEY_A}\nAddress = 10.0.0.2/32\n# Host = gaming-pc 192.168.1.50\n[Peer]\nPublicKey = {KEY_B}\nAllowedIPs = 10.0.0.1\n");
+        assert_eq!(parse(&text).unwrap().hosts, [("gaming-pc".to_string(), "192.168.1.50".parse().unwrap())]);
+        assert_eq!(host_from_comment(" Hostname = x"), None);
+        assert_eq!(host_from_comment(" Host = 192.168.1.50"), Some(Err(())));
+        assert_eq!(host_from_comment(" Host = 10.0.0.1 10.0.0.2"), Some(Err(())));
+        assert_eq!(host_from_comment(" Host ="), None);
+        assert_eq!(host_from_comment("é"), None);
     }
 
     #[test]

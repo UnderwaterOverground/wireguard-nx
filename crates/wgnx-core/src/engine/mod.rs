@@ -132,6 +132,8 @@ pub struct Engine {
     mtu: usize,
     listen_port: Option<u16>,
     self_name: Option<String>,
+    /// `# Host =` names the tunnel reaches, for the hosts file.
+    extra_hosts: Vec<(Ipv4Addr, String)>,
     configured: bool,
     /// In .conf order; `PeerId(i + 1)`.
     peers: Vec<Peer>,
@@ -164,6 +166,7 @@ impl Engine {
             mtu: DEFAULT_MTU,
             listen_port: None,
             self_name: None,
+            extra_hosts: Vec::new(),
             configured: false,
             peers: Vec::new(),
             io: VecDeque::new(),
@@ -228,6 +231,16 @@ impl Engine {
         self.addresses = cfg.interface.addresses;
         self.listen_port = cfg.interface.listen_port;
         self.self_name = cfg.interface.name;
+        self.extra_hosts.clear();
+        for (name, ip) in cfg.hosts {
+            if self.route(IpAddr::V4(ip)).is_none() {
+                self.events.push_back(Event::Log(format!("Host {name}: {ip} isn't in any peer's AllowedIPs; not naming it")));
+            } else if self.self_name.as_deref() == Some(name.as_str()) || self.peers.iter().any(|p| p.name == name) {
+                self.events.push_back(Event::Log(format!("Host {name}: a peer already has that name; not naming {ip}")));
+            } else {
+                self.extra_hosts.push((ip, name));
+            }
+        }
         self.configured = true;
         self.events.push_back(Event::Addresses(self.addresses.clone()));
         self.events.push_back(Event::Peers(self.peers.len()));
@@ -286,8 +299,9 @@ impl Engine {
         out
     }
 
-    /// IPv4 address and name of this interface (if its .conf names it) and
-    /// of every peer with an IPv4 /32 AllowedIP, for a hosts file.
+    /// IPv4 address and name of this interface (if its .conf names it), of
+    /// every peer with an IPv4 /32 AllowedIP and of each `# Host =` line,
+    /// for a hosts file.
     pub fn hosts(&self) -> Vec<(Ipv4Addr, &str)> {
         let mut out = Vec::new();
         if let Some(name) = &self.self_name {
@@ -302,6 +316,9 @@ impl Engine {
             if let Some(a) = p.ipv4() {
                 out.push((a, p.name.as_str()));
             }
+        }
+        for (a, name) in &self.extra_hosts {
+            out.push((*a, name.as_str()));
         }
         out
     }
@@ -662,7 +679,7 @@ mod tests {
     }
 
     fn conf(private: [u8; 32], addr: &str, peers: Vec<PeerConf>) -> WgConfig {
-        WgConfig { interface: Interface { private_key: private, addresses: alloc::vec![prefix(addr)], listen_port: None, mtu: None, name: None }, peers }
+        WgConfig { interface: Interface { private_key: private, addresses: alloc::vec![prefix(addr)], listen_port: None, mtu: None, name: None }, peers, hosts: Vec::new() }
     }
 
     fn peer(private_of_peer: [u8; 32], name: &str, allowed: &[&str], endpoint: Option<(EndpointHost, u16)>, keepalive: Option<u16>) -> PeerConf {
@@ -908,6 +925,22 @@ mod tests {
         assert_eq!(info.ipv4, Some("10.7.0.1".parse().unwrap()));
         let unconfigured = Engine::new(p.now, Duration::ZERO);
         assert!(!unconfigured.is_configured() && unconfigured.routes().is_empty());
+    }
+
+    #[test]
+    fn host_names_need_a_route_and_a_free_name() {
+        let mut p = Pair::client_server();
+        let mut c = conf(A_PRIV, "10.7.0.2/24", alloc::vec![peer(B_PRIV, "server", &["10.7.0.1/32", "10.123.0.0/24"], ep(B_ADDR), None)]);
+        c.hosts = alloc::vec![
+            ("gaming-pc".into(), "10.123.0.50".parse().unwrap()),
+            ("elsewhere".into(), "192.168.9.9".parse().unwrap()),
+            ("server".into(), "10.123.0.51".parse().unwrap()),
+        ];
+        p.a.reload(c, p.now);
+        assert_eq!(p.a.hosts(), [("10.7.0.1".parse().unwrap(), "server"), ("10.123.0.50".parse().unwrap(), "gaming-pc")]);
+        let logs: Vec<String> = Pair::events(&mut p.a).into_iter().filter_map(|e| if let Event::Log(m) = e { Some(m) } else { None }).collect();
+        assert!(logs.iter().any(|m| m.contains("elsewhere") && m.contains("AllowedIPs")));
+        assert!(logs.iter().any(|m| m.contains("Host server") && m.contains("already")));
     }
 
     #[test]

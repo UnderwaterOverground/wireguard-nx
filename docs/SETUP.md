@@ -104,6 +104,13 @@ and anyone with it can join your network as the Switch.
     stand-in reaches the real address, and sees the stand-in as the other
     end. Other programs don't use the tunnel, so they're unaffected.
     `aliases=off` in `config.ini` writes the real addresses instead.
+  - A stand-in always goes through the tunnel, even at home, so a stream
+    by name takes the trip through the server there too.
+- **Other names:** a `# Host = gaming-pc 192.168.1.50` line anywhere in the
+  `.conf` names an address that isn't a peer, such as a PC on the server's
+  home network, the same way. The address must be inside a peer's
+  `AllowedIPs`, and the name must not be a peer's; otherwise the log says
+  why it was skipped.
   - Atmosphère's Nintendo blocking is left alone, and names containing
     "nintendo" are never added.
   - If there's no hosts file, names stay off. wireguard-nx never creates
@@ -286,9 +293,9 @@ limit.
 - **Moonlight is slow or choppy away from home.**
   - Check Moonlight's bitrate is within the
     [limits we found safe](../README.md#using-it-with-moonlight), and that
-    the PC is added by its peer name: a PC added by a local-network
-    address (`10.x`, `172.16.x` to `172.31.x`, `192.168.x`) is only safe up
-    to 20 Mbit/s at 720p.
+    the PC is added by name (a peer name, or a `# Host =` line): a PC added
+    by a local-network address (`10.x`, `172.16.x` to `172.31.x`,
+    `192.168.x`) is only safe up to 20 Mbit/s at 720p.
 - **Moonlight finds the PC at home but not away.**
   - Check that Moonlight's saved host includes the peer name or a tunnel
     address, that `AllowedIPs` covers the PC's address, and that the overlay
