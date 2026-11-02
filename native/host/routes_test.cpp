@@ -54,5 +54,34 @@ int main() {
     assert(!Routed("192.168.1.10"));
     VSock::SetRoutes(nullptr, 0);
     assert(!Routed("8.8.8.8") && !Routed("10.7.0.1"));
+
+    // Stand-ins: only private addresses get one, keeping the last two numbers.
+    auto ip = [](const char *s) { return ntohl(inet_addr(s)); };
+    assert(VSock::AliasFor(ip("10.253.0.1")) == ip("100.127.0.1"));
+    assert(VSock::AliasFor(ip("192.168.1.50")) == ip("100.127.1.50"));
+    assert(VSock::AliasFor(ip("172.20.3.4")) == ip("100.127.3.4"));
+    assert(!VSock::AliasFor(ip("100.101.102.103")) && !VSock::AliasFor(ip("8.8.8.8")) && !VSock::AliasFor(ip("172.32.0.1")));
+    assert(!VSock::AliasFor(ip("10.1.0.0")) && !VSock::AliasFor(ip("10.1.255.255")));
+    // A stand-in goes through the tunnel even when its peer is on our LAN,
+    // and translates both ways.
+    const WgnxPrefix peer[] = {V4("10.7.0.2", 32), V4("192.168.1.10", 32)};
+    VSock::SetRoutes(peer, 2);
+    const VSock::Alias aliases[] = {{ip("100.127.1.10"), ip("192.168.1.10")}};
+    VSock::SetAliases(aliases, 1);
+    VSock::SetLocalNet(ip("192.168.1.50"), 24);
+    assert(Routed("100.127.1.10") && !Routed("100.127.1.11") && !Routed("192.168.1.10"));
+    uint32_t a = ip("100.127.1.10");
+    assert(VSock::ToReal(&a) && a == ip("192.168.1.10") && VSock::ToAlias(&a) && a == ip("100.127.1.10"));
+    a = ip("10.7.0.2");
+    assert(!VSock::ToReal(&a) && !VSock::ToAlias(&a) && a == ip("10.7.0.2"));
+    // On a network that uses 100.127.0.0/16 itself, its hosts win.
+    VSock::SetLocalNet(ip("100.127.0.5"), 16);
+    a = ip("100.127.1.10");
+    assert(!Routed("100.127.1.10") && !VSock::ToReal(&a));
+    a = ip("192.168.1.10");
+    assert(!VSock::ToAlias(&a));
+    VSock::SetAliases(nullptr, 0);
+    VSock::SetLocalNet(0, 32);
+    VSock::SetRoutes(nullptr, 0);
     std::puts("routes-test: ok");
 }

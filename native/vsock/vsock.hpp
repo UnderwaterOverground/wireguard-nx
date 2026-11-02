@@ -121,6 +121,27 @@ public:
     // covers them (forces a stream from a local host through the server).
     static void SetTunnelLan(bool on);
 
+    // Stand-in addresses for peers. Moonlight sends 1392-byte video packets
+    // to private addresses (10/8, 172.16/12, 192.168/16) and 1024-byte ones
+    // to everything else; the big ones don't fit the tunnel's MTU, so each
+    // arrives in two fragments and the Switch receives twice the datagrams.
+    // Peer names therefore resolve to a stand-in in 100.127.0.0/16 (hosts
+    // file), and this layer swaps it for the peer's real address on the way
+    // out and back on the way in, for the sockets that used it. Stand-ins
+    // always go through the tunnel. Addresses in host byte order.
+    struct Alias {
+        uint32_t alias;
+        uint32_t real;
+    };
+    static constexpr size_t MaxAliases = 32;
+    static void SetAliases(const Alias *aliases, size_t n);
+    // The stand-in for a private peer address, or 0 for one that needs none.
+    static uint32_t AliasFor(uint32_t real);
+    // Swap a stand-in for its real address (ToReal) or back (ToAlias) in
+    // place; false (unchanged) if ip isn't one.
+    static bool ToReal(uint32_t *ip);
+    static bool ToAlias(uint32_t *ip);
+
 private:
     struct VFd {
         int type = 0;  // SOCK_STREAM or SOCK_DGRAM
@@ -132,6 +153,7 @@ private:
         bool connecting = false;
         bool connected_virtual = false;
         bool has_udp_peer = false;
+        bool aliased = false;  // sent to a stand-in: show its peer as one too
         WgnxAddr udp_peer{};
         uint16_t port = 0;       // locally bound port
         bool bound_any = false;  // bound to the wildcard address
@@ -140,6 +162,11 @@ private:
         int so_error = 0;
         int rcv_timeout_ms = -1, snd_timeout_ms = -1;
     };
+
+    // Swaps a stand-in destination for the real address, noting it in v.
+    static void Unalias(WgnxAddr *a, VFd &v);
+    // Shows a peer address as its stand-in if v used one.
+    static void Realias(WgnxAddr *a, const VFd &v);
 
     // Copies the state for fd (false if unknown).
     bool Get(int fd, VFd *out);

@@ -10,6 +10,7 @@
 //                                    else wg0.conf), log_udp=<ip>:<port>,
 //                                    mitm=homebrew|homebrew,sys-ftpd|off,
 //                                    mitm_titles=<program IDs>, hosts=on|off,
+//                                    aliases=on|off (stand-in peer addresses),
 //                                    overlay_budget_kb=<128..384>,
 //                                    connect_notice=on|off, update_check=on|off,
 //                                    tunnel_lan=on (tests: LAN through the tunnel)
@@ -318,6 +319,7 @@ namespace ams {
             char mitm[32] = "homebrew";  // "homebrew,sys-ftpd" or "off"
             char mitm_titles[384] = {};  // forwarders' program IDs, served like homebrew
             char hosts[8] = "on";        // peer names in Atmosphere's hosts file, or "off"
+            char aliases[8] = "on";      // private peer addresses named as 100.127.x.y stand-ins, or "off"
             char overlay_budget_kb[8] = {};  // tunnel socket buffers; default 320
             char connect_notice[8] = "on";   // toast with our address when first connected
             char update_check[8] = "on";     // ask GitHub for a newer release at boot
@@ -342,6 +344,7 @@ namespace ams {
                 set("mitm", c.mitm, sizeof c.mitm);
                 set("mitm_titles", c.mitm_titles, sizeof c.mitm_titles);
                 set("hosts", c.hosts, sizeof c.hosts);
+                set("aliases", c.aliases, sizeof c.aliases);
                 set("overlay_budget_kb", c.overlay_budget_kb, sizeof c.overlay_budget_kb);
                 set("connect_notice", c.connect_notice, sizeof c.connect_notice);
                 set("update_check", c.update_check, sizeof c.update_check);
@@ -657,6 +660,7 @@ namespace ams {
         constinit os::SdkMutex g_conf_mutex;
         constinit char g_conf_name[WGNX_CTL_CONF_NAME_MAX] = {};
         constinit bool g_hosts_on = true;
+        constinit bool g_aliases_on = true;
         constinit std::atomic<bool> g_hosts_due = false;  // Collect() ran; Write() pending
 
         // Loads config/wireguard-nx/<name> into the engine (directly at boot,
@@ -686,7 +690,7 @@ namespace ams {
                 n_routes = wgnx_engine_routes(e, routes, ::wgnx::VSock::MaxRoutes);
                 static WgnxPeerInfo info[WGNX_CTL_MAX_PEERS];
                 peers = static_cast<u32>(wgnx_engine_peers(e, info, WGNX_CTL_MAX_PEERS));
-                if (g_hosts_on) g_hosts_due = hosts::Collect(e) || g_hosts_due.load();
+                if (g_hosts_on) g_hosts_due = hosts::Collect(e, g_aliases_on) || g_hosts_due.load();
                 return true;
             };
             const bool ok = rt ? rt->With(load) : load(engine);
@@ -1197,6 +1201,7 @@ namespace ams {
         WgnxEngine *engine = wgnx_engine_new(wgnx_driver_now_ns(), unix_time);
         g_engine = engine;
         g_hosts_on = std::strcmp(cfg.hosts, "off") != 0;
+        g_aliases_on = std::strcmp(cfg.aliases, "off") != 0;
         if (std::strcmp(cfg.tunnel_lan, "on") == 0) {
             Log("tunnel_lan=on: LAN addresses go through the tunnel too (testing)");
             ::wgnx::VSock::SetTunnelLan(true);

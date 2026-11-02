@@ -16,8 +16,11 @@ extern "C" {
 namespace ams::hosts {
 
     // Builds the managed block from the engine's current peers (call with
-    // the runtime lock held). Returns whether it changed, for Write().
-    bool Collect(WgnxEngine *engine);
+    // the runtime lock held). Returns whether it changed, for Write(). With
+    // aliases, private peer addresses are written as stand-ins the socket
+    // layer translates (VSock::SetAliases), so Moonlight sizes its packets
+    // to fit the tunnel.
+    bool Collect(WgnxEngine *engine, bool aliases);
 
     // Rewrites the managed block with what Collect() built, without the
     // runtime lock: it reads and rewrites a file on the SD card, which can

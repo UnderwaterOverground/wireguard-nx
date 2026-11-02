@@ -93,6 +93,18 @@ size_t g_num_routes = 0;
 uint32_t g_local_ipv4 = 0;
 unsigned g_local_len = 32;
 bool g_tunnel_lan = false;
+VSock::Alias g_aliases[VSock::MaxAliases];
+size_t g_num_aliases = 0;
+
+constexpr uint32_t kAliasNet = 0x647f0000u;  // 100.127.0.0/16
+
+// A stand-in on our own LAN (a CGNAT network that happens to use it) is a
+// real host there, never a stand-in. Caller holds g_routes_mu.
+bool AliasOnLan(uint32_t ip) {
+    if (!g_local_ipv4) return false;
+    const uint32_t mask = g_local_len ? ~0u << (32 - g_local_len) : 0;
+    return (ip & mask) == (g_local_ipv4 & mask);
+}
 
 // Whether the first `len` bits of a and b match.
 bool PrefixMatch(const uint8_t *a, const uint8_t *b, unsigned len) {
@@ -122,6 +134,63 @@ void VSock::SetTunnelLan(bool on) {
     g_tunnel_lan = on;
 }
 
+void VSock::SetAliases(const Alias *aliases, size_t n) {
+    std::lock_guard<std::mutex> lock(g_routes_mu);
+    g_num_aliases = std::min(n, MaxAliases);
+    if (g_num_aliases) std::memcpy(g_aliases, aliases, g_num_aliases * sizeof *aliases);
+}
+
+uint32_t VSock::AliasFor(uint32_t real) {
+    const bool is_private = (real >> 24) == 10 || (real & 0xfff00000u) == 0xac100000u || (real & 0xffff0000u) == 0xc0a80000u;
+    if (!is_private) return 0;
+    // Keep the last two numbers, so 10.253.0.1 stands in as 100.127.0.1.
+    const uint32_t alias = kAliasNet | (real & 0xffffu);
+    return (real & 0xffffu) == 0 || (real & 0xffffu) == 0xffffu ? 0 : alias;
+}
+
+bool VSock::ToReal(uint32_t *ip) {
+    std::lock_guard<std::mutex> lock(g_routes_mu);
+    for (size_t i = 0; i < g_num_aliases; i++) {
+        if (g_aliases[i].alias == *ip && !AliasOnLan(*ip)) {
+            *ip = g_aliases[i].real;
+            return true;
+        }
+    }
+    return false;
+}
+
+bool VSock::ToAlias(uint32_t *ip) {
+    std::lock_guard<std::mutex> lock(g_routes_mu);
+    for (size_t i = 0; i < g_num_aliases; i++) {
+        if (g_aliases[i].real == *ip && !AliasOnLan(g_aliases[i].alias)) {
+            *ip = g_aliases[i].alias;
+            return true;
+        }
+    }
+    return false;
+}
+
+void VSock::Unalias(WgnxAddr *a, VFd &v) {
+    if (a->family != 4) return;
+    uint32_t ip;
+    std::memcpy(&ip, a->ip, 4);
+    ip = ntohl(ip);
+    if (!ToReal(&ip)) return;
+    ip = htonl(ip);
+    std::memcpy(a->ip, &ip, 4);
+    v.aliased = true;
+}
+
+void VSock::Realias(WgnxAddr *a, const VFd &v) {
+    if (!v.aliased || a->family != 4) return;
+    uint32_t ip;
+    std::memcpy(&ip, a->ip, 4);
+    ip = ntohl(ip);
+    if (!ToAlias(&ip)) return;
+    ip = htonl(ip);
+    std::memcpy(a->ip, &ip, 4);
+}
+
 bool VSock::IsTunnel(const sockaddr *addr) {
     if (!addr) return false;
     uint8_t ip[16];
@@ -144,6 +213,13 @@ bool VSock::IsTunnel(const sockaddr *addr) {
         return false;
     }
     std::lock_guard<std::mutex> lock(g_routes_mu);
+    if (family == 4) {
+        uint32_t v4;
+        std::memcpy(&v4, ip, 4);
+        v4 = ntohl(v4);
+        for (size_t i = 0; i < g_num_aliases; i++)
+            if (g_aliases[i].alias == v4 && !AliasOnLan(v4)) return true;  // a stand-in: always the tunnel
+    }
     if (family == 4 && g_local_ipv4 && !g_tunnel_lan) {
         uint8_t local[4];
         const uint32_t local_be = htonl(g_local_ipv4);
@@ -300,6 +376,7 @@ Result VSock::Connect(int fd, const sockaddr *addr, socklen_t len) {
     }
     WgnxAddr dst;
     ToAddr(addr, &dst);
+    Unalias(&dst, v);
     if (v.type == SOCK_DGRAM) {
         if (!EnsureUdp(fd, v)) return Fail(Err::Inval);
         v.udp_peer = dst;
@@ -332,7 +409,10 @@ Result VSock::Connect(int fd, const sockaddr *addr, socklen_t len) {
 Result VSock::Bind(int fd, const sockaddr *addr, socklen_t len) {
     VFd v;
     if (!Get(fd, &v)) return real_.Bind(fd, addr, len);
-    if (IsTunnel(addr)) {
+    // A stand-in isn't ours to bind: the real stack refuses it.
+    uint32_t bind_ip = addr->sa_family == AF_INET ? ntohl(reinterpret_cast<const sockaddr_in *>(addr)->sin_addr.s_addr) : 0;
+    const bool stand_in = bind_ip && ToReal(&bind_ip);
+    if (IsTunnel(addr) && !stand_in) {
         // Binding to our tunnel address: the real stack doesn't have it.
         v.port = PortOf(addr);
         v.virtual_only = true;
@@ -462,6 +542,9 @@ Result VSock::SendTo(int fd, const void *buf, size_t len, int flags, const socka
             return real_.SendTo(fd, buf, len, flags, to, tolen);
         }
         ToAddr(to, &dst);
+        const bool was_aliased = v.aliased;
+        Unalias(&dst, v);
+        if (v.aliased != was_aliased) Put(fd, v);
     } else if (v.has_udp_peer) {
         dst = v.udp_peer;
     } else {
@@ -505,6 +588,7 @@ Result VSock::RecvFrom(int fd, void *buf, size_t len, int flags, sockaddr *from,
             return wgnx_net_udp_recvfrom(e, v.udp, static_cast<uint8_t *>(buf), len, &src);
         });
         if (n >= 0) {
+            Realias(&src, v);
             FromAddr(src, from, fromlen);
             return Result::Ok(n);
         }
@@ -636,12 +720,15 @@ Result VSock::GetPeerName(int fd, sockaddr *addr, socklen_t *len) {
     VFd v;
     if (!Get(fd, &v) || (!v.tcp && !v.has_udp_peer)) return real_.GetPeerName(fd, addr, len);
     if (v.has_udp_peer) {
-        FromAddr(v.udp_peer, addr, len);
+        WgnxAddr a = v.udp_peer;
+        Realias(&a, v);
+        FromAddr(a, addr, len);
         return Result::Ok(0);
     }
     if (!v.tcp) return Fail(Err::NotConn);
     WgnxAddr a{};
     if (rt_.With([&](WgnxEngine *e) { return wgnx_net_peer_addr(e, v.tcp, &a); }) != 0) return Fail(Err::NotConn);
+    Realias(&a, v);
     FromAddr(a, addr, len);
     return Result::Ok(0);
 }
