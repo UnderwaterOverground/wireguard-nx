@@ -30,6 +30,9 @@ int wgnx_snprintf(char *dst, size_t size, const char *fmt, ...);
 // Datagrams read per readiness report: the rest wait for the next round, so
 // a socket that keeps "returning" something can't hold the loop.
 #define UDP_RECV_BATCH 64
+// Rounds in a row wgnx_driver_poll may skip poll() while the socket is
+// backlogged, before it polls anyway (for the caller's other fds).
+#define UDP_BACKLOG_ROUNDS 8
 // Datagrams are read UDP_STAGED at a time into sbuf (page-aligned: on the
 // Switch it is also the socket service's message buffer), UDP_SLOT bytes
 // each (underlay datagrams fit), and handed to the engine from there.
@@ -60,6 +63,8 @@ struct WgnxDriver {
     } staged[UDP_STAGED];
     int n_staged, staged_all;  // staged_all: the socket was drained
     int prefetched;            // staged by wgnx_driver_prefetch, without the caller's lock
+    int backlog;               // the last prefetch filled a batch: likely more queued
+    int backlog_rounds;        // polls skipped in a row for it
     // Batched receive (Switch): 1 works, 0 not known yet, -1 off (and the
     // socket service's errno, if a call failed); misses: batches that came
     // back empty while recvfrom then found a datagram.
@@ -164,6 +169,7 @@ void wgnx_driver_suspend(WgnxDriver *d) {
         close(d->udp_fd);
         d->udp_fd = -1;
     }
+    d->backlog = 0;
 }
 
 int wgnx_driver_resume(WgnxDriver *d) {
@@ -348,6 +354,19 @@ void wgnx_driver_prefetch(WgnxDriver *d, const struct pollfd *fds) {
     STEP("UDP prefetch");
     d->n_staged = stage(d);
     d->staged_all = d->n_staged < UDP_STAGED;
+    d->backlog = !d->staged_all;
+}
+
+int wgnx_driver_poll(WgnxDriver *d, struct pollfd *fds, int nfds, int wait_ms) {
+    if (d->backlog && d->poll_udp >= 0 && d->backlog_rounds < UDP_BACKLOG_ROUNDS) {
+        d->backlog_rounds++;
+        for (int i = 0; i < nfds; i++) fds[i].revents = 0;
+        fds[d->poll_udp].revents = POLLIN;
+        return 1;
+    }
+    d->backlog = 0;  // the prefetch after this poll sets it again
+    d->backlog_rounds = 0;
+    return poll(fds, (nfds_t)nfds, wait_ms);
 }
 
 // Hands the staged datagrams to the engine, then reads and hands over more

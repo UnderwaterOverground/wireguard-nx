@@ -65,6 +65,14 @@ void wgnx_driver_dispatch(WgnxDriver *d, const struct pollfd *fds);
 // stays readable, and the next round's prefetch reads the rest.
 void wgnx_driver_prefetch(WgnxDriver *d, const struct pollfd *fds);
 
+// poll() for the split form. When the last prefetch filled a whole batch the
+// socket most likely has more queued: this reports it readable at once (and
+// the caller's other fds idle) instead of spending a poll on it, for up to
+// a few rounds in a row. A burst then drains a batch per round with one
+// socket call each, rather than overflowing the socket's buffer while the
+// loop waits on poll(); each poll is an IPC on the Switch.
+int wgnx_driver_poll(WgnxDriver *d, struct pollfd *fds, int nfds, int wait_ms);
+
 // Performs engine I/O queued since the last call (e.g. after overlay socket
 // operations) without waiting.
 void wgnx_driver_pump(WgnxDriver *d);

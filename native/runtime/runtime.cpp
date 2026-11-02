@@ -268,7 +268,7 @@ void Runtime::Loop(const std::function<void(WgnxDriver *)> *on_tick, const std::
         poll_until_ns_ = wgnx_driver_now_ns() + static_cast<uint64_t>(wait) * 1000000;
         lock.unlock();
         if (ticked && after_tick && *after_tick) (*after_tick)();
-        int rc = poll(fds, static_cast<nfds_t>(nfds), wait);
+        int rc = wgnx_driver_poll(driver_, fds, nfds, wait);
         // Socket reads without the lock: each is an IPC on the Switch, and
         // callers (an app reading video) would otherwise wait them out.
         if (rc > 0) wgnx_driver_prefetch(driver_, fds);
