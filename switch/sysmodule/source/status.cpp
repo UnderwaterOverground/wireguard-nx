@@ -23,7 +23,7 @@ namespace ams::status {
         constexpr const char ConfigNotifyPath[] = "sdmc:/config/ultrahand/notifications/wireguard-nx-config.notify";
         // Config problems show at boot, often before anyone looks at the
         // screen, and say what to do: long enough to read and act on.
-        constexpr u32 ConfigToastMs = 30000;
+        constexpr u32 ConfigToastMs = 20000;
         // The overlay's "Connection notice" switch: present = off.
         constexpr const char NoNoticePath[] = "sdmc:/config/wireguard-nx/no-connect-notice";
 
@@ -86,7 +86,7 @@ namespace ams::status {
             if (!g_connect_notice || Exists(NoNoticePath, fs::DirectoryEntryType_File)) return;
             char text[48];
             util::SNPrintf(text, sizeof text, "Connected. IP: %u.%u.%u.%u", g_status.ipv4[0], g_status.ipv4[1], g_status.ipv4[2], g_status.ipv4[3]);
-            Toast(ConnectedNotifyPath, "WireGuard", text, 8000);
+            Toast(ConnectedNotifyPath, "WireGuard", text, 5000);
         }
 
         // Errors go into JSON and the overlay: keep them to plain printable
@@ -213,14 +213,14 @@ namespace ams::status {
     void AnnounceUpdate(const char *latest) {
         char text[96];
         util::SNPrintf(text, sizeof text, "wireguard-nx %s is out (you have %s).", latest, wgnx_version());
-        Toast(UpdateNotifyPath, "WireGuard: update available", text, 20000);
+        Toast(UpdateNotifyPath, "WireGuard: update available", text, 10000);
     }
 
     void AnnounceLowMemory(u32 free_kb) {
         char text[128];
         util::SNPrintf(text, sizeof text, "Only %u KB was free after boot. If the Switch crashes (2001-0132), turn off a sysmodule.",
                        static_cast<unsigned>(free_kb));
-        Toast(MemoryNotifyPath, "WireGuard: low system memory", text, 20000);
+        Toast(MemoryNotifyPath, "WireGuard: low system memory", text, 10000);
     }
 
     WgnxCtlStatus Get() {

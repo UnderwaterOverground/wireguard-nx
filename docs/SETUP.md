@@ -115,7 +115,7 @@ and anyone with it can join your network as the Switch.
     "nintendo" are never added.
   - If there's no hosts file, names stay off. wireguard-nx never creates
     one. `hosts=off` in `config.ini` turns this off.
-- **Connected notice:** after each boot, an 8-second toast shows
+- **Connected notice:** after each boot, a 5-second toast shows
   "Connected. IP: 10.x.y.z" the first time a peer handshakes. It doesn't
   appear again on wake or reconnect. Turn it off with **Connection notice**
   in the overlay.
