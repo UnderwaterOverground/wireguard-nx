@@ -150,8 +150,10 @@ turn it on as you normally would.
 
 ### It didn't work
 
-- **No notification after a few minutes:** open the overlay. **Config
-  error** names the line of the `.conf` it couldn't read. **Connecting...**
+- **No notification after a few minutes:** open the overlay. **No
+  config** means it found no `.conf` to use, and says what to do (a file
+  saved as `wg0.conf.txt` needs renaming, for one). **Config error** names
+  the line of the `.conf` it couldn't read. **Connecting...**
   with "No handshake yet" means the server didn't answer: check the
   endpoint and port (and that the port is forwarded if you're away from
   home), the keys, and that the server has the Switch as a peer.

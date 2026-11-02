@@ -35,6 +35,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <strings.h>
 
 extern "C" {
 #include <switch/services/bsd.h>
@@ -406,6 +407,33 @@ namespace ams {
             if (found == 1) util::SNPrintf(out, cap, "%s", only);
         }
 
+        // What to do when `name` isn't in the config folder, from what is:
+        // nothing, a .conf saved as .conf.txt (Windows hides extensions), or
+        // other .conf files to pick from.
+        void DescribeMissingConf(const char *name, char *out, size_t cap) {
+            int confs = 0;
+            char txt[WGNX_CTL_CONF_NAME_MAX + 4] = {};
+            fs::DirectoryHandle dir;
+            if (R_SUCCEEDED(fs::OpenDirectory(std::addressof(dir), ConfigDir, fs::OpenDirectoryMode_File))) {
+                ON_SCOPE_EXIT { fs::CloseDirectory(dir); };
+                static fs::DirectoryEntry entry;
+                s64 got = 0;
+                while (R_SUCCEEDED(fs::ReadDirectory(std::addressof(got), std::addressof(entry), dir, 1)) && got == 1) {
+                    const size_t n = std::strlen(entry.name);
+                    if (ValidConfName(entry.name)) confs++;
+                    else if (!txt[0] && n > 9 && n < sizeof txt && strcasecmp(entry.name + n - 9, ".conf.txt") == 0)
+                        util::SNPrintf(txt, sizeof txt, "%s", entry.name);
+                }
+            }
+            if (confs > 0) {
+                util::SNPrintf(out, cap, "%s isn't in config/wireguard-nx. Pick one of the .conf files there under Config.", name);
+            } else if (txt[0]) {
+                util::SNPrintf(out, cap, "Rename %s to %.*s, then restart the Switch.", txt, static_cast<int>(std::strlen(txt) - 4), txt);
+            } else {
+                util::SNPrintf(out, cap, "No .conf in config/wireguard-nx. Copy your WireGuard config there and restart.");
+            }
+        }
+
         // ---- network -----------------------------------------------------
 
         bool NetworkUp() {
@@ -674,8 +702,12 @@ namespace ams {
             auto text = std::make_unique<char[]>(ConfMaxSize);
             const s64 len = ReadWholeFile(path, text.get(), ConfMaxSize);
             if (len < 0) {
-                Log("config: %s: not found (or over %zu KB)", path, ConfMaxSize / 1024);
-                status::SetConfError(name, "not found in config/wireguard-nx");
+                char what[160];
+                DescribeMissingConf(name, what, sizeof what);
+                Log("config: %s: not found (or over %zu KB). %s", path, ConfMaxSize / 1024, what);
+                // From the overlay's Config page the file was there a moment
+                // ago, and the running config stays: only a boot has none.
+                if (!rt) status::SetConfMissing(what);
                 return WGNX_CTL_CONF_NOT_FOUND;
             }
             WgnxConfig wc = {};

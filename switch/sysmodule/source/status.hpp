@@ -38,6 +38,8 @@ namespace ams::status {
     // Or it failed: the error is kept for the overlay, with a toast.
     void SetConf(const char *name, u32 peers);
     void SetConfError(const char *name, const char *error);
+    // No .conf to load: `message` says what to do (shown as it is).
+    void SetConfMissing(const char *message);
     // Engine events (engine thread, runtime lock held).
     void OnEvent(const WgnxEvent &ev);
     // Every peer (engine thread, every round): n is how many there are, of

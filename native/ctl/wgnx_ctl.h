@@ -58,6 +58,7 @@ enum {
     WGNX_CTL_FLAG_HOSTS = 2,       // peer names in Atmosphere's hosts file
     WGNX_CTL_FLAG_OFFLINE = 4,     // the console has no internet connection
     WGNX_CTL_FLAG_CONF_ERROR = 8,  // the .conf didn't load (GetLastError says why); nothing is configured
+    WGNX_CTL_FLAG_CONF_MISSING = 16,  // with CONF_ERROR: there was no .conf to load (GetLastError says what to do)
 };
 
 typedef struct {

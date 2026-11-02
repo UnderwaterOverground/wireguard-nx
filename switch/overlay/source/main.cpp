@@ -648,7 +648,7 @@ namespace {
                 case WGNX_CTL_STOPPING:    state = "Stopping...";   color = Grey;   break;
             }
             if ((g_status.flags & WGNX_CTL_FLAG_CONF_ERROR) && g_status.state != WGNX_CTL_PAUSED && g_status.state != WGNX_CTL_STOPPING) {
-                state = "Config error";
+                state = (g_status.flags & WGNX_CTL_FLAG_CONF_MISSING) ? "No config" : "Config error";
                 color = Red;
             }
             if (Offline()) {
@@ -692,7 +692,9 @@ namespace {
         if ((g_status.flags & WGNX_CTL_FLAG_CONF_ERROR) && g_status.state != WGNX_CTL_PAUSED) {
             // "wg0.conf: line 12: PublicKey: not valid base64"
             DrawTwoLines(r, g_last_error[0] ? g_last_error : "The .conf didn't load.", x + 20, y + 75, 15, Grey, 46);
-            r->drawString("Fix it, or pick another one under Config.", false, x + 20, y + 120, 15, r->a(Grey));
+            // A missing one's message already says what to do.
+            if (!(g_status.flags & WGNX_CTL_FLAG_CONF_MISSING))
+                r->drawString("Fix it, or pick another one under Config.", false, x + 20, y + 120, 15, r->a(Grey));
             return;
         }
         if (Stalled()) {

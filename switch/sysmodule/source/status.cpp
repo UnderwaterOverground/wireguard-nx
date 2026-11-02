@@ -21,6 +21,9 @@ namespace ams::status {
         constexpr const char UpdateNotifyPath[] = "sdmc:/config/ultrahand/notifications/wireguard-nx-update.notify";
         constexpr const char MemoryNotifyPath[] = "sdmc:/config/ultrahand/notifications/wireguard-nx-memory.notify";
         constexpr const char ConfigNotifyPath[] = "sdmc:/config/ultrahand/notifications/wireguard-nx-config.notify";
+        // Config problems show at boot, often before anyone looks at the
+        // screen, and say what to do: long enough to read and act on.
+        constexpr u32 ConfigToastMs = 30000;
         // The overlay's "Connection notice" switch: present = off.
         constexpr const char NoNoticePath[] = "sdmc:/config/wireguard-nx/no-connect-notice";
 
@@ -83,7 +86,7 @@ namespace ams::status {
             if (!g_connect_notice || Exists(NoNoticePath, fs::DirectoryEntryType_File)) return;
             char text[48];
             util::SNPrintf(text, sizeof text, "Connected. IP: %u.%u.%u.%u", g_status.ipv4[0], g_status.ipv4[1], g_status.ipv4[2], g_status.ipv4[3]);
-            Toast(ConnectedNotifyPath, "WireGuard", text, 5000);
+            Toast(ConnectedNotifyPath, "WireGuard", text, 8000);
         }
 
         // Errors go into JSON and the overlay: keep them to plain printable
@@ -125,7 +128,7 @@ namespace ams::status {
         util::SNPrintf(g_conf_name, sizeof g_conf_name, "%s", name);
         g_status.peers = peers;
         g_status.peers_up = 0;
-        g_status.flags &= ~static_cast<u32>(WGNX_CTL_FLAG_CONF_ERROR);
+        g_status.flags &= ~static_cast<u32>(WGNX_CTL_FLAG_CONF_ERROR | WGNX_CTL_FLAG_CONF_MISSING);
         g_last_error[0] = 0;
         g_handshaken = false;
         g_peer_count = g_peer_total = 0;
@@ -136,6 +139,7 @@ namespace ams::status {
         {
             std::scoped_lock lk(g_mutex);
             g_status.flags |= WGNX_CTL_FLAG_CONF_ERROR;
+            g_status.flags &= ~static_cast<u32>(WGNX_CTL_FLAG_CONF_MISSING);
             char msg[192];
             util::SNPrintf(msg, sizeof msg, "%s: %s", name, error);
             CopySafe(g_last_error, sizeof g_last_error, msg);
@@ -143,7 +147,18 @@ namespace ams::status {
         }
         char text[220];
         util::SNPrintf(text, sizeof text, "%s", g_last_error);
-        Toast(ConfigNotifyPath, "WireGuard: config error", text, 10000);
+        Toast(ConfigNotifyPath, "WireGuard: config error", text, ConfigToastMs);
+    }
+
+    void SetConfMissing(const char *message) {
+        {
+            std::scoped_lock lk(g_mutex);
+            g_status.flags |= WGNX_CTL_FLAG_CONF_ERROR | WGNX_CTL_FLAG_CONF_MISSING;
+            CopySafe(g_last_error, sizeof g_last_error, message);
+        }
+        char text[220];
+        util::SNPrintf(text, sizeof text, "%s", g_last_error);
+        Toast(ConfigNotifyPath, "WireGuard: no config", text, ConfigToastMs);
     }
 
     void OnEvent(const WgnxEvent &ev) {
@@ -198,14 +213,14 @@ namespace ams::status {
     void AnnounceUpdate(const char *latest) {
         char text[96];
         util::SNPrintf(text, sizeof text, "wireguard-nx %s is out (you have %s).", latest, wgnx_version());
-        Toast(UpdateNotifyPath, "WireGuard: update available", text, 10000);
+        Toast(UpdateNotifyPath, "WireGuard: update available", text, 20000);
     }
 
     void AnnounceLowMemory(u32 free_kb) {
         char text[128];
         util::SNPrintf(text, sizeof text, "Only %u KB was free after boot. If the Switch crashes (2001-0132), turn off a sysmodule.",
                        static_cast<unsigned>(free_kb));
-        Toast(MemoryNotifyPath, "WireGuard: low system memory", text, 10000);
+        Toast(MemoryNotifyPath, "WireGuard: low system memory", text, 20000);
     }
 
     WgnxCtlStatus Get() {

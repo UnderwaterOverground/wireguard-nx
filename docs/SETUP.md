@@ -115,7 +115,7 @@ and anyone with it can join your network as the Switch.
     "nintendo" are never added.
   - If there's no hosts file, names stay off. wireguard-nx never creates
     one. `hosts=off` in `config.ini` turns this off.
-- **Connected notice:** after each boot, a 5-second toast shows
+- **Connected notice:** after each boot, an 8-second toast shows
   "Connected. IP: 10.x.y.z" the first time a peer handshakes. It doesn't
   appear again on wake or reconnect. Turn it off with **Connection notice**
   in the overlay.
@@ -249,6 +249,11 @@ limit.
 
 ## Troubleshooting
 
+- **The overlay says "No config".**
+  - There's no `.conf` to use in `config/wireguard-nx`, and the message says
+    what to do: copy one there, rename one saved as `wg0.conf.txt` (Windows
+    hides the `.txt` by default), or, if `config.ini`'s `conf=` names a file
+    that isn't there, pick one of the others on the Config page.
 - **The overlay says "Config error".**
   - It names the `.conf` and the line it couldn't read (a key that isn't
     valid base64, a missing `PrivateKey` or `Address`, an unknown setting).

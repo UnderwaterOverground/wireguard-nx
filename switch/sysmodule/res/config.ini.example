@@ -33,7 +33,7 @@
 # default; raise it only if apps report "no buffer space" (errno 105). It
 # comes out of the sysmodule's fixed heap.
 # overlay_budget_kb=320
-# A 5-second "Connected. IP: ..." toast after each boot (also switchable in
+# An 8-second "Connected. IP: ..." toast after each boot (also switchable in
 # the overlay).
 # connect_notice=on
 # Ask GitHub for the latest release once per boot, 10 seconds after
