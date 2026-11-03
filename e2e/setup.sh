@@ -11,10 +11,14 @@
 #   roam     10.7.0.6
 #   noep     10.7.0.7  no Endpoint: the server contacts it (172.31.0.30:41649)
 #   dns      10.7.0.8  Endpoint by name (wg-server-later, see run-tests.sh)
+# AmneziaWG clients (peers of the awg server, 10.7.1.1):
+#   awgclient 10.7.1.2  (awg-plain: the same keys without the AmneziaWG keys)
+#   awgswitch 10.7.1.3  for a console on the LAN, via the published port
+#                       (WGNX_LAN_IP overrides the host address it uses)
 set -euo pipefail
 cd "$(dirname "$0")"
 mkdir -p state
-docker compose --profile peer build -q peer
+docker compose --profile peer build -q peer awg-peer
 
 if [[ ! -s state/keys.txt ]]; then
   # Plain docker run: the compose service's mounts would create the .conf
@@ -24,9 +28,26 @@ if [[ ! -s state/keys.txt ]]; then
       k=$(wg genkey); echo "$n $k $(echo "$k" | wg pubkey) $(wg genpsk)"
     done' > state/keys.txt
 fi
+for n in awg awgclient awgswitch; do  # added later: an older state/ may lack them
+  grep -q "^$n " state/keys.txt || docker run --rm --entrypoint sh wgnx-e2e-peer -c \
+    "k=\$(wg genkey); echo \"$n \$k \$(echo \"\$k\" | wg pubkey) \$(wg genpsk)\"" >> state/keys.txt
+done
 key() { awk -v n="$1" -v f="$2" '$1==n {print $f}' state/keys.txt; }  # f: 2 private, 3 public, 4 psk
 SERVER=172.31.0.20
 PEER2=172.31.0.21
+AWG_SERVER=172.31.0.22
+LAN_IP=${WGNX_LAN_IP:-$(ipconfig getifaddr en0 2>/dev/null || hostname -I 2>/dev/null | awk '{print $1}')}
+# The obfuscation both sides of the AmneziaWG tunnel agree on: junk before
+# handshakes, padded handshake messages, disguised headers (H4 a range).
+AWG="Jc = 4
+Jmin = 40
+Jmax = 70
+S1 = 15
+S2 = 22
+H1 = 1234567
+H2 = 2345678
+H3 = 3456789
+H4 = 4000000-4999999"
 
 client() {  # name address peers...
   local name=$1 addr=$2; shift 2
@@ -59,6 +80,13 @@ client roam 10.7.0.6/24 "" "$S" "AllowedIPs = 10.7.0.1/32"
 client noep 10.7.0.7/24 "ListenPort = 41649" "" "[Peer]" "# Name = server" "PublicKey = $(key server 3)" "AllowedIPs = 10.7.0.1/32"
 client dns 10.7.0.8/24 "" "[Peer]" "# Name = server" "PublicKey = $(key server 3)" "AllowedIPs = 10.7.0.1/32" "Endpoint = wg-server-later:51820"
 printf '[Interface]\nPrivateKey = not-a-key\nAddress = 10.7.0.99/24\n' > state/bad.conf
+A="[Peer]
+# Name = awg-server
+PublicKey = $(key awg 3)
+AllowedIPs = 10.7.1.1/32"
+client awgclient 10.7.1.2/24 "$AWG" "" "$A" "Endpoint = $AWG_SERVER:51820"
+grep -v -E '^(Jc|Jmin|Jmax|S[1-4]|H[1-4]) ' state/awgclient.conf > state/awg-plain.conf
+client awgswitch 10.7.1.3/24 "$AWG" "" "$A" "Endpoint = ${LAN_IP:-192.0.2.1}:51821" "PersistentKeepalive = 25"
 
 {
   printf '[Interface]\nPrivateKey = %s\nAddress = 10.7.0.1/24\nListenPort = 51820\n' "$(key server 2)"
@@ -74,11 +102,17 @@ printf '[Interface]\nPrivateKey = not-a-key\nAddress = 10.7.0.99/24\n' > state/b
   printf '[Interface]\nPrivateKey = %s\nAddress = 10.7.0.9/24\nListenPort = 51820\n' "$(key peer2 2)"
   server_peer client 10.7.0.2/32
 } > state/wg0-peer2.conf
+{
+  printf '[Interface]\nPrivateKey = %s\nAddress = 10.7.1.1/24\nListenPort = 51820\n%s\n' "$(key awg 2)" "$AWG"
+  server_peer awgclient 10.7.1.2/32
+  server_peer awgswitch 10.7.1.3/32
+} > state/awg0.conf
 
-docker compose --profile peer up -d peer peer2 web iperf
+docker compose --profile peer up -d peer peer2 web iperf awg-peer
 for _ in $(seq 30); do
-  docker compose exec -T peer wg show wg0 >/dev/null 2>&1 && break
+  docker compose exec -T peer wg show wg0 >/dev/null 2>&1 && docker compose exec -T awg-peer awg show awg0 >/dev/null 2>&1 && break
   sleep 1
 done
 echo "server: 10.7.0.1 at $SERVER:51820; peer2: 10.7.0.9 at $PEER2:51820"
-echo "confs:  e2e/state/{client,preload,bg,psk,roam,noep,dns}.conf"
+echo "awg server: 10.7.1.1 at $AWG_SERVER:51820 (from the LAN: ${LAN_IP:-?}:51821)"
+echo "confs:  e2e/state/{client,preload,bg,psk,roam,noep,dns,awgclient,awg-plain,awg-switch}.conf"

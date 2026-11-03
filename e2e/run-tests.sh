@@ -122,5 +122,11 @@ if preload bad "curl -s -m 10 http://172.31.0.20:8080/" 2>/dev/null | grep -q "<
 if docker compose run --rm -T --entrypoint /src/target/linux/wgnx-c wgnx --conf /state/client.conf --port 41652 \
      --echo-test "$SERVER_IP" --sleep-test >/tmp/wgnx-e2e-15.log 2>&1; then pass "echo after suspend/resume ($(grep -o 'in [0-9.]* s' /tmp/wgnx-e2e-15.log))"; else fail "echo after suspend/resume (see /tmp/wgnx-e2e-15.log)"; fi
 
+# 16. AmneziaWG: junk, padded handshakes and disguised headers against a
+# real amneziawg-go; the same keys without the obfuscation get nowhere.
+AWG_IP=10.7.1.1
+if wgnx up --conf /state/awgclient.conf --port 41653 --echo-test "$AWG_IP" --expect-handshake >/tmp/wgnx-e2e-16.log 2>&1; then pass "AmneziaWG echo + handshake"; else fail "AmneziaWG echo + handshake (see /tmp/wgnx-e2e-16.log)"; fi
+if ! wgnx up --conf /state/awg-plain.conf --port 41653 --expect-handshake --duration 15 >/dev/null 2>&1; then pass "plain WireGuard refused by the AmneziaWG server"; else fail "plain WireGuard refused by the AmneziaWG server"; fi
+
 echo
 if [[ $fails -eq 0 ]]; then echo "all e2e tests passed"; else echo "$fails test(s) failed"; exit 1; fi

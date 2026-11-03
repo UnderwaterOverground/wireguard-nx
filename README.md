@@ -17,6 +17,7 @@ No account, relay, or per-app setup. Just a standard WireGuard config.
 - Runs at boot and reconnects after sleep.
 - Works with homebrew launched through hbmenu, including supported home-screen forwarders.
 - Uses regular WireGuard `.conf` files: multiple peers, pre-shared keys, hostnames and keepalives are supported.
+- [AmneziaWG](#amneziawg) configs work as they are.
 - Ultrahand overlay for connection status, peer handshakes, traffic, pause/start/stop and switching configs.
 - Optional update notifications and [sys-ftpd](https://github.com/cathery/sys-ftpd) access over the tunnel.
 - Fixed 2.5 MB memory usage.
@@ -97,6 +98,12 @@ Then add `gaming-pc` in Moonlight. wireguard-nx maps it to a stand-in address so
 ## Multiple configs
 
 Put additional `.conf` files in `config/wireguard-nx` and switch between them from Ultrahand's **Config** page. The selection is remembered after reboot.
+
+## AmneziaWG
+
+A config from the Amnezia app or `amneziawg-tools` works unchanged: the `Jc`/`Jmin`/`Jmax`, `S1`–`S4`, `H1`–`H4` and `I1`–`I5` settings are read from `[Interface]` and the Switch sends junk, padded handshakes and disguised headers exactly as the server expects. Nothing else changes. A config without those keys is plain WireGuard.
+
+Not supported: AmneziaWG 3's `HeaderProtectionKey` (the config is refused with that message), random trailers and custom timings. `S4` bytes ride on every packet, so the default MTU drops by `S4` unless `MTU` is set.
 
 ## Limitations
 

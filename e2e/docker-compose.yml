@@ -1,6 +1,7 @@
-# Local WireGuard network for end-to-end tests: two stock peers
-# (wireguard-go) with echo services, and the wgnx client built for Linux.
-# setup.sh generates the keys and .conf files under state/.
+# Local WireGuard network for end-to-end tests: two stock peers (the Docker
+# VM's kernel WireGuard), an AmneziaWG peer, echo services, and the wgnx
+# client built for Linux. setup.sh generates the keys and .conf files under
+# state/.
 name: wgnx-e2e
 
 networks:
@@ -38,6 +39,23 @@ services:
       wgnx:
         ipv4_address: 172.31.0.21
     depends_on: [peer]
+    profiles: [peer]
+
+  # An AmneziaWG server (awg 10.7.1.1) for the obfuscation tests. Its port
+  # is also published on the host (UDP 51821) so a console on the LAN can
+  # test against it with state/awg-switch.conf.
+  awg-peer:
+    build: { context: ., dockerfile: Dockerfile.awg-peer }
+    image: wgnx-e2e-awg-peer
+    volumes:
+      - ./state/awg0.conf:/etc/amnezia/amneziawg/awg0.conf:ro
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    cap_add: [NET_ADMIN]
+    ports: ["51821:51820/udp"]
+    networks:
+      wgnx:
+        ipv4_address: 172.31.0.22
     profiles: [peer]
 
   # HTTP (8080) and iperf3 (5201) servers inside peer's network namespace,
