@@ -19,6 +19,7 @@ pub(crate) fn trim_vec<T>(v: &mut alloc::vec::Vec<T>) {
     }
 }
 
+pub mod awg;
 pub mod bench;
 pub mod config;
 pub mod crypto;

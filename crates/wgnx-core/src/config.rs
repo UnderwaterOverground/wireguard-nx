@@ -14,6 +14,10 @@
 //! address the tunnel reaches (a PC on the server's network) for the hosts
 //! file. A malformed one is logged and ignored, never an error: other tools'
 //! comments may start with "Host" too.
+//!
+//! AmneziaWG's `[Interface]` keys (`Jc`, `Jmin`, `Jmax`, `S1`..`S4`,
+//! `H1`..`H4`, `I1`..`I5`) are accepted as amneziawg-tools writes them; see
+//! [`crate::awg`].
 
 use alloc::format;
 use alloc::string::{String, ToString};
@@ -46,6 +50,8 @@ pub struct Interface {
     pub mtu: Option<u16>,
     /// From a name comment in `[Interface]`, for the hosts file.
     pub name: Option<String>,
+    /// AmneziaWG settings; the default is plain WireGuard.
+    pub awg: crate::awg::Params,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -126,6 +132,22 @@ const KNOWN_KEYS: &[&str] = &[
     "postdown",
     "fwmark",
     "saveconfig",
+    "jc",
+    "jmin",
+    "jmax",
+    "s1",
+    "s2",
+    "s3",
+    "s4",
+    "h1",
+    "h2",
+    "h3",
+    "h4",
+    "i1",
+    "i2",
+    "i3",
+    "i4",
+    "i5",
 ];
 
 struct PeerBuilder {
@@ -146,6 +168,9 @@ struct InterfaceBuilder {
     mtu: Option<u16>,
     name: Option<String>,
     implied_name: Option<String>,
+    awg: crate::awg::Params,
+    /// `I1`..`I5` by slot; the set ones go into `awg.signatures` in order.
+    signatures: [Option<crate::awg::Signature>; 5],
 }
 
 pub fn parse(text: &str) -> Result<WgConfig, ParseError> {
@@ -212,6 +237,8 @@ pub fn parse(text: &str) -> Result<WgConfig, ParseError> {
                     mtu: None,
                     name: None,
                     implied_name: None,
+                    awg: Default::default(),
+                    signatures: Default::default(),
                 });
                 section = Section::Interface;
             } else if name.eq_ignore_ascii_case("Peer") {
@@ -257,6 +284,25 @@ pub fn parse(text: &str) -> Result<WgConfig, ParseError> {
                         }
                         b.mtu = Some(mtu);
                     }
+                    "jc" | "jmin" | "jmax" => {
+                        let n: u32 = value.parse().map_err(|_| err(line_no, format!("{}: bad value {value:?}", upper(&key))))?;
+                        match key.as_str() {
+                            "jc" => b.awg.junk_count = n,
+                            "jmin" => b.awg.junk_min = n,
+                            _ => b.awg.junk_max = n,
+                        }
+                    }
+                    "s1" | "s2" | "s3" | "s4" => {
+                        let n: u16 = value.parse().map_err(|_| err(line_no, format!("{}: bad value {value:?}", upper(&key))))?;
+                        b.awg.prefix[slot(&key)] = n;
+                    }
+                    "h1" | "h2" | "h3" | "h4" => {
+                        b.awg.header[slot(&key)] = crate::awg::Range::parse(value).map_err(|m| err(line_no, format!("{}: {m}", upper(&key))))?;
+                    }
+                    "i1" | "i2" | "i3" | "i4" | "i5" => {
+                        b.signatures[slot(&key)] = Some(crate::awg::Signature::parse(value).map_err(|m| err(line_no, format!("{}: {m}", upper(&key))))?);
+                    }
+                    "headerprotectionkey" => return Err(err(line_no, "HeaderProtectionKey: AmneziaWG header protection isn't supported".into())),
                     k if IGNORED_INTERFACE_KEYS.contains(&k) => log::debug!("conf: ignoring {k}"),
                     k => return Err(err(line_no, format!("unknown [Interface] key {k:?}"))),
                 }
@@ -293,6 +339,9 @@ pub fn parse(text: &str) -> Result<WgConfig, ParseError> {
     if iface.addresses.is_empty() {
         return Err(err(0, "[Interface] has no Address".into()));
     }
+    let mut awg = iface.awg;
+    awg.signatures = iface.signatures.into_iter().flatten().collect();
+    awg.validate().map_err(|m| err(0, format!("AmneziaWG: {m}")))?;
     let our_public = crate::crypto::x25519_public(&private_key);
     let mut out_peers: Vec<PeerConf> = Vec::with_capacity(peers.len());
     for (i, p) in peers.into_iter().enumerate() {
@@ -329,10 +378,23 @@ pub fn parse(text: &str) -> Result<WgConfig, ParseError> {
             listen_port: iface.listen_port,
             mtu: iface.mtu,
             name: iface.name.or(iface.implied_name).map(|n| normalize_name(&n)).filter(|n| !n.is_empty()),
+            awg,
         },
         peers: out_peers,
         hosts,
     })
+}
+
+/// `S1`, `H4`, `I5` -> 0, 3, 4.
+fn slot(key: &str) -> usize {
+    usize::from(key.as_bytes()[1] - b'1')
+}
+
+/// The AmneziaWG key as its documentation spells it: `jmin` -> `Jmin`.
+fn upper(key: &str) -> String {
+    let mut s = key.to_string();
+    s[..1].make_ascii_uppercase();
+    s
 }
 
 /// A `Host = name a.b.c.d` (or `Host: ...`) comment: None if the comment
@@ -583,6 +645,41 @@ mod tests {
         .unwrap_err();
         assert!(own.msg.contains("own key"), "{own}");
         assert_eq!(format!("{}", e("[Interface]\nPrivateKey = nope!\n")), "line 2: PrivateKey: not valid base64");
+    }
+
+    #[test]
+    fn amneziawg_keys() {
+        use crate::awg::Range;
+        // As the Amnezia app and amneziawg-tools write a client .conf.
+        let text = format!(
+            "[Interface]\nAddress = 10.8.1.2/32\nDNS = 1.1.1.1\nPrivateKey = {KEY_A}\nJc = 4\nJmin = 40\nJmax = 70\nS1 = 15\nS2 = 22\nH1 = 1234567\nH2 = 2345678\nH3 = 3456789\nH4 = 4567890\n\n[Peer]\nPublicKey = {KEY_B}\nAllowedIPs = 0.0.0.0/0\nEndpoint = 203.0.113.5:51820\n"
+        );
+        let c = parse(&text).unwrap();
+        let a = &c.interface.awg;
+        assert_eq!((a.junk_count, a.junk_min, a.junk_max), (4, 40, 70));
+        assert_eq!(a.prefix, [15, 22, 0, 0]);
+        assert_eq!(a.header, [Range::one(1234567), Range::one(2345678), Range::one(3456789), Range::one(4567890)]);
+        assert!(a.signatures.is_empty() && !a.is_plain());
+        // AmneziaWG 2: ranges, S3/S4, signature packets (I3 set, I1 not).
+        let text = format!("[Interface]\nPrivateKey = {KEY_A}\nAddress = 10.0.0.2\nH1 = 100-200\nH4 = 5\nS3 = 1\nS4 = 20\nI3 = <b 0x474554><r 8>\nI2 = <t>\n[Peer]\nPublicKey = {KEY_B}\n");
+        let a = parse(&text).unwrap().interface.awg;
+        assert_eq!(a.header, [Range { lo: 100, hi: 200 }, Range::one(2), Range::one(3), Range::one(5)]);
+        assert_eq!(a.prefix, [0, 0, 1, 20]);
+        assert_eq!(a.signatures.len(), 2);
+        assert_eq!(a.signatures[0].len(), 4, "I2 comes first");
+        assert_eq!(a.signatures[1].len(), 11);
+        // A conf without the keys is plain WireGuard.
+        assert!(parse(&format!("[Interface]\nPrivateKey = {KEY_A}\nAddress = 10.0.0.2\n")).unwrap().interface.awg.is_plain());
+
+        let e = |extra: &str| parse(&format!("[Interface]\nPrivateKey = {KEY_A}\nAddress = 10.0.0.2\n{extra}\n")).unwrap_err();
+        assert_eq!(e("Jc = x"), ParseError { line: 4, msg: "Jc: bad value \"x\"".into() });
+        assert_eq!(e("Jmin = 80\nJmax = 70"), ParseError { line: 0, msg: "AmneziaWG: Jmin 80 is more than Jmax 70".into() });
+        assert_eq!(e("H1 = 5\nH2 = 1-10").msg, "AmneziaWG: H1 5 and H2 1-10 overlap");
+        assert_eq!(e("H3 = 9-8"), ParseError { line: 4, msg: "H3: 9-8 is backwards".into() });
+        assert_eq!(e("S4 = 70000").msg, "S4: bad value \"70000\"");
+        assert_eq!(e("S4 = 900").msg, "AmneziaWG: S4 900: the most is 844");
+        assert_eq!(e("I1 = <zz 3>"), ParseError { line: 4, msg: "I1: unknown tag <zz>".into() });
+        assert!(e("HeaderProtectionKey = 00").msg.contains("isn't supported"));
     }
 
     #[test]

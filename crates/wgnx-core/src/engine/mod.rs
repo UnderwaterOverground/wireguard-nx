@@ -22,6 +22,7 @@ use ts_keys::{NodeKeyPair, NodePrivateKey, NodePublicKey};
 use ts_packet::PacketMut;
 use ts_tunnel::{PeerConfig, PeerId};
 
+use crate::awg;
 use crate::config::{EndpointHost, WgConfig};
 use crate::netstack::Netstack;
 use crate::time::Instant;
@@ -96,6 +97,8 @@ struct Peer {
     rx_bytes: u64,
     tx_bytes: u64,
     no_endpoint_logged: bool,
+    /// Handshake MACs and the peer's cookie, for AmneziaWG framing.
+    macs: awg::PeerMacs,
 }
 
 /// A peer as the UI sees it.
@@ -137,6 +140,9 @@ pub struct Engine {
     configured: bool,
     /// In .conf order; `PeerId(i + 1)`.
     peers: Vec<Peer>,
+    /// AmneziaWG framing, when the .conf asks for it.
+    awg: Option<awg::Params>,
+    my_macs: awg::MyMacs,
     io: VecDeque<Io>,
     events: VecDeque<Event>,
     now: Instant,
@@ -169,6 +175,8 @@ impl Engine {
             extra_hosts: Vec::new(),
             configured: false,
             peers: Vec::new(),
+            awg: None,
+            my_macs: awg::MyMacs::new(&crate::crypto::x25519_public(&placeholder)),
             io: VecDeque::new(),
             events: VecDeque::new(),
             now,
@@ -218,11 +226,23 @@ impl Engine {
                 rx_bytes: 0,
                 tx_bytes: 0,
                 no_endpoint_logged: false,
+                macs: awg::PeerMacs::new(&p.public_key),
             });
         }
         self.wg = wg;
         self.peers = peers;
-        self.mtu = cfg.interface.mtu.map_or(DEFAULT_MTU, usize::from);
+        self.my_macs = awg::MyMacs::new(&crate::crypto::x25519_public(&cfg.interface.private_key));
+        let awg_params = cfg.interface.awg;
+        // S4 bytes ride on every transport message: with no MTU set, make
+        // room for them, as the default 1420 does for WireGuard's own 60.
+        let default_mtu = DEFAULT_MTU - usize::from(awg_params.prefix[3]);
+        if awg_params.is_plain() {
+            self.awg = None;
+        } else {
+            self.events.push_back(Event::Log(format!("AmneziaWG: {}", awg_params.summary())));
+            self.awg = Some(awg_params);
+        }
+        self.mtu = cfg.interface.mtu.map_or(default_mtu, usize::from);
         self.net.set_mtu(self.mtu);
         let addrs: Vec<IpAddr> = cfg.interface.addresses.iter().map(|p| p.addr).collect();
         if self.net.addresses() != addrs.as_slice() {
@@ -499,11 +519,39 @@ impl Engine {
             }
             return;
         };
+        let unix_secs = (self.wall.1 + now.saturating_duration_since(self.wall.0)).as_secs() as u32;
         for p in pkts {
-            let data = p.as_ref().to_vec();
+            let wire = p.as_ref();
+            let data = match &self.awg {
+                None => wire.to_vec(),
+                Some(awg) => {
+                    if wire.first() == Some(&1) {
+                        for junk in awg.preamble(unix_secs) {
+                            peer.tx_bytes += junk.len() as u64;
+                            self.io.push_back(Io::SendUdp { dst, data: junk });
+                        }
+                    }
+                    awg.wrap(wire, &mut peer.macs, now)
+                }
+            };
             peer.tx_bytes += data.len() as u64;
             self.io.push_back(Io::SendUdp { dst, data });
         }
+    }
+
+    /// An AmneziaWG cookie reply: for whichever peer's last handshake
+    /// message it answers (the one at its source address, most likely).
+    fn cookie_reply(&mut self, src: SocketAddr, nonce: [u8; 24], sealed: [u8; 32]) {
+        let now = self.now;
+        let first = self.peer_for_source(src);
+        let order = first.into_iter().chain((0..self.peers.len()).filter(|i| Some(*i) != first));
+        for i in order {
+            if self.peers[i].macs.receive_cookie(&nonce, &sealed, now) {
+                log::debug!("{}: cookie reply taken; the next handshake carries mac2", self.peers[i].name);
+                return;
+            }
+        }
+        log::debug!("cookie reply from {src} matched no handshake of ours");
     }
 
     /// Sends the peer an empty packet: a keepalive if a session is up, else
@@ -547,8 +595,19 @@ impl Engine {
     }
 
     fn handle_wg(&mut self, data: &[u8], src: SocketAddr) {
-        let ty = data.first().copied().unwrap_or(0);
-        let res = self.wg.recv(self.now, [PacketMut::from(data.to_vec())]);
+        let pkt = match &self.awg {
+            None => data.to_vec(),
+            Some(awg) => match awg.unwrap(data, &self.my_macs) {
+                awg::Inbound::Message(m) => m,
+                awg::Inbound::CookieReply { nonce, sealed } => return self.cookie_reply(src, nonce, sealed),
+                awg::Inbound::Junk => {
+                    log::trace!("awg: {} bytes from {src} are not a message", data.len());
+                    return;
+                }
+            },
+        };
+        let ty = pkt.first().copied().unwrap_or(0);
+        let res = self.wg.recv(self.now, [PacketMut::from(pkt)]);
         log::trace!(
             "wg in type {ty} len {} from {src}: {} to local, {} replies",
             data.len(),
@@ -679,7 +738,22 @@ mod tests {
     }
 
     fn conf(private: [u8; 32], addr: &str, peers: Vec<PeerConf>) -> WgConfig {
-        WgConfig { interface: Interface { private_key: private, addresses: alloc::vec![prefix(addr)], listen_port: None, mtu: None, name: None }, peers, hosts: Vec::new() }
+        conf_awg(private, addr, peers, Default::default())
+    }
+
+    fn conf_awg(private: [u8; 32], addr: &str, peers: Vec<PeerConf>, awg: awg::Params) -> WgConfig {
+        WgConfig { interface: Interface { private_key: private, addresses: alloc::vec![prefix(addr)], listen_port: None, mtu: None, name: None, awg }, peers, hosts: Vec::new() }
+    }
+
+    fn awg_params() -> awg::Params {
+        awg::Params {
+            junk_count: 3,
+            junk_min: 40,
+            junk_max: 70,
+            prefix: [15, 22, 4, 8],
+            header: [awg::Range { lo: 100, hi: 200 }, awg::Range::one(300), awg::Range::one(400), awg::Range { lo: 500, hi: 600 }],
+            signatures: alloc::vec![awg::Signature::parse("<b 0x474554><r 8>").unwrap()],
+        }
     }
 
     fn peer(private_of_peer: [u8; 32], name: &str, allowed: &[&str], endpoint: Option<(EndpointHost, u16)>, keepalive: Option<u16>) -> PeerConf {
@@ -723,6 +797,17 @@ mod tests {
         /// A knows B's address; B learns A's from traffic.
         fn client_server() -> Self {
             Self::new(peer(B_PRIV, "server", &["10.7.0.1/32", "10.123.0.0/24"], ep(B_ADDR), None), peer(A_PRIV, "switch", &["10.7.0.2/32"], None, None))
+        }
+
+        /// As `client_server`, each side with its own AmneziaWG settings.
+        fn client_server_awg(a: awg::Params, b: awg::Params) -> Self {
+            let mut p = Self::client_server();
+            // Drop what the plain reloads sent, then configure for real.
+            while p.a.poll_io().is_some() {}
+            while p.b.poll_io().is_some() {}
+            p.a.reload(conf_awg(A_PRIV, "10.7.0.2/24", alloc::vec![peer(B_PRIV, "server", &["10.7.0.1/32", "10.123.0.0/24"], ep(B_ADDR), None)], a), p.now);
+            p.b.reload(conf_awg(B_PRIV, "10.7.0.1/24", alloc::vec![peer(A_PRIV, "switch", &["10.7.0.2/32"], None, None)], b), p.now);
+            p
         }
 
         /// Moves datagrams between the engines until both are quiet.
@@ -800,6 +885,84 @@ mod tests {
         let info = &p.a.peers_info()[0];
         assert!(info.rx_bytes > 0 && info.tx_bytes > 0);
         assert_eq!(info.last_handshake, Some(Duration::ZERO));
+    }
+
+    #[test]
+    fn amneziawg_peers_handshake_behind_junk_and_disguised_headers() {
+        let mut p = Pair::client_server_awg(awg_params(), awg_params());
+        assert!(Pair::events(&mut p.a).iter().any(|e| matches!(e, Event::Log(s) if s.starts_with("AmneziaWG: Jc=3"))));
+        // The reload kicked B: nothing on the wire says WireGuard.
+        let mut burst = Vec::new();
+        while let Some(Io::SendUdp { data, .. }) = p.a.poll_io() {
+            burst.push(data);
+        }
+        assert_eq!(burst.len(), 1 + 3 + 1, "I1, Jc junk, initiation");
+        assert_eq!(&burst[0][..3], b"GET");
+        assert!(burst[1..4].iter().all(|j| (40..70).contains(&j.len())));
+        let init = &burst[4];
+        assert_eq!(init.len(), 15 + 148);
+        assert!((100..=200).contains(&u32::from_le_bytes(init[15..19].try_into().unwrap())));
+        assert!(burst.iter().all(|d| d[0] != 1 || d.len() != 148));
+        for d in burst {
+            p.b.handle_udp(p.a_src, &d, p.now);
+        }
+        let Some(Io::SendUdp { data: resp, .. }) = p.b.poll_io() else { panic!("no response") };
+        assert_eq!(resp.len(), 22 + 92);
+        assert_eq!(u32::from_le_bytes(resp[22..26].try_into().unwrap()), 300);
+        p.a.handle_udp(B_ADDR.parse().unwrap(), &resp, p.now);
+        p.shuttle();
+        assert!(Pair::events(&mut p.a).contains(&Event::Handshake { peer: 0 }));
+        assert!(Pair::events(&mut p.b).contains(&Event::Handshake { peer: 0 }));
+        assert_eq!(p.b.peers_info()[0].endpoint, Some(p.a_src));
+        // Data flows, with S4 bytes and an H4 header on every datagram.
+        assert!(udp_echo(&mut p));
+        p.a.net().udp_send_to(p.a_sock.unwrap(), b"ping", "10.7.0.1:7".parse().unwrap()).unwrap();
+        p.a.flush(p.now);
+        let Some(Io::SendUdp { data, .. }) = p.a.poll_io() else { panic!("no data") };
+        assert!((500..=600).contains(&u32::from_le_bytes(data[8..12].try_into().unwrap())));
+        assert_eq!(data.len(), 8 + 16 + 32 + 16, "S4 + header + 32-byte IP packet + tag");
+        // Junk in both directions is ignored, and a plain WireGuard
+        // keepalive from a stranger too.
+        p.a.handle_udp(B_ADDR.parse().unwrap(), &[0x55; 60], p.now);
+        p.b.handle_udp(p.a_src, &[4, 0, 0, 0, 1, 2, 3, 4, 0, 0, 0, 0, 0, 0, 0, 0, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9], p.now);
+        assert!(p.a.poll_io().is_none() && p.b.poll_io().is_none());
+        assert!(udp_echo(&mut p));
+        // Retried initiations get junk again.
+        let mut a = Pair::client_server_awg(awg_params(), awg_params());
+        a.drop_b_to_a = true;
+        a.shuttle();
+        let (rx, tx) = (a.b.peers_info()[0].rx_bytes, a.a.peers_info()[0].tx_bytes);
+        a.advance(Duration::from_secs(6));
+        assert_eq!(a.b.peers_info()[0].rx_bytes, rx + 15 + 148, "the retry reached B");
+        assert!(a.a.peers_info()[0].tx_bytes >= tx + 11 + 3 * 40 + 15 + 148, "with junk ahead of it");
+    }
+
+    #[test]
+    fn amneziawg_and_plain_wireguard_do_not_mix() {
+        for (a, b) in [(awg_params(), awg::Params::default()), (awg::Params::default(), awg_params()), (awg_params(), { let mut b = awg_params(); b.header[0] = awg::Range::one(7); b })] {
+            let mut p = Pair::client_server_awg(a, b);
+            p.shuttle();
+            p.advance(Duration::from_secs(12));
+            assert!(!Pair::events(&mut p.a).contains(&Event::Handshake { peer: 0 }));
+            assert!(!p.a.peers_info()[0].session && !p.b.peers_info()[0].session);
+            assert_eq!(p.b.peers_info()[0].endpoint, None, "B never authenticated A");
+        }
+    }
+
+    #[test]
+    fn s4_lowers_the_default_mtu() {
+        let now = Instant::from_nanos(1_000_000_000);
+        let mut e = Engine::new(now, Duration::from_secs(1_700_000_000));
+        let mut awg = awg::Params::default();
+        awg.prefix[3] = 100;
+        e.reload(conf_awg(A_PRIV, "10.7.0.2/24", Vec::new(), awg.clone()), now);
+        assert_eq!(e.mtu(), DEFAULT_MTU - 100);
+        let mut c = conf_awg(A_PRIV, "10.7.0.2/24", Vec::new(), awg);
+        c.interface.mtu = Some(1400);
+        e.reload(c, now);
+        assert_eq!(e.mtu(), 1400);
+        e.reload(conf(A_PRIV, "10.7.0.2/24", Vec::new()), now);
+        assert_eq!(e.mtu(), DEFAULT_MTU);
     }
 
     #[test]
