@@ -20,7 +20,7 @@ see the tunnel.
 
 ## Install
 
-The [README](../README.md#install) walks through it step by step, including
+The [README](../README.md#installation) walks through it step by step, including
 how to copy the files on Windows and on a Mac. In short, copy these to the SD
 card, adding them to the folders already there:
 
@@ -29,7 +29,7 @@ card, adding them to the folders already there:
 | `atmosphere/contents/4200000000005747/` | The sysmodule. `flags/boot2.flag` makes it start at boot. |
 | `switch/.overlays/wireguard-nx.ovl` | The overlay: status, peers, a pause switch, config picker, stop and start |
 | `config/wireguard-nx/config.ini.example` | Settings template (optional; see below) |
-| `config/wireguard-nx/wg0.conf` | Your tunnel configuration (you make this one, see below) |
+| `config/wireguard-nx/<name>.conf` | Your tunnel configuration, from your server (see below) |
 
 Then restart the console.
 
@@ -37,7 +37,13 @@ Then restart the console.
 
 wireguard-nx reads the same `[Interface]` / `[Peer]` file as `wg-quick` and
 every WireGuard app. Your server makes one when you add a peer for the
-Switch; save it as `config/wireguard-nx/wg0.conf` on the SD card.
+Switch; save it in `config/wireguard-nx` on the SD card. Any name ending
+`.conf` works; with several, pick one under **Config** in the overlay.
+
+The `PrivateKey` line is the Switch's private key. Your server makes it
+along with the matching public key when you add the peer, keeps the public
+one, and puts the private one in the file it gives you. Copy the file as it
+is; there's nothing to make on the Switch.
 
 ```ini
 [Interface]
@@ -77,12 +83,26 @@ PersistentKeepalive = 25
   download its config or scan nothing: copy the text from "Peer
   configuration". Set the tunnel active.
 - **wg-easy:** add a client, download its `.conf`.
-- **OPNsense, pfSense, MikroTik, UniFi, Synology, Fritz!Box:** each has a
-  WireGuard page where you add a peer and export its configuration.
-- **Linux with `wg`:** make a key pair (`wg genkey | tee switch.key | wg
-  pubkey > switch.pub`), add `[Peer] PublicKey = <switch.pub> AllowedIPs =
-  10.x.x.x/32` to the server, and write the Switch's file by hand from the
-  example above.
+- **UniFi, Fritz!Box, MikroTik, OPNsense (Peer generator):** each has a
+  WireGuard page where you add a peer and download or copy its
+  configuration.
+- **pfSense, Linux with `wg`:** these want the Switch's public key, so make
+  the keys yourself (below).
+
+### Making the keys yourself
+
+Some servers only take the Switch's public key. Make a key pair on any
+computer, then write the Switch's file from the example above:
+
+- **With `wg`** (Linux, or macOS with `brew install wireguard-tools`):
+  `wg genkey | tee switch.key | wg pubkey > switch.pub`. `switch.key` is
+  the private key for the Switch's file; `switch.pub` goes to the server.
+- **With the WireGuard app** (Windows, macOS): **Add empty tunnel**. It
+  shows a new private key in the text and the public key above it. Copy
+  both, then delete the tunnel.
+
+Give the server the public key, with `AllowedIPs` set to the Switch's
+tunnel address (e.g. `10.253.0.2/32`).
 
 Treat the `.conf` like a password: it contains the Switch's private key,
 and anyone with it can join your network as the Switch.
@@ -100,7 +120,7 @@ and anyone with it can join your network as the Switch.
     written as a stand-in in `100.127.0.0/16` with the same last two
     numbers (`10.253.0.1` becomes `100.127.0.1`), so Moonlight sends video
     packets that fit the tunnel (see the
-    [README](../README.md#using-it-with-moonlight)). Homebrew reaching the
+    [README](../README.md#moonlight)). Homebrew reaching the
     stand-in reaches the real address, and sees the stand-in as the other
     end. Other programs don't use the tunnel, so they're unaffected.
     `aliases=off` in `config.ini` writes the real addresses instead.
@@ -297,7 +317,7 @@ limit.
   - All apps share the tunnel socket memory. Raise `overlay_budget_kb`.
 - **Moonlight is slow or choppy away from home.**
   - Check Moonlight's bitrate is within the
-    [limits we found safe](../README.md#using-it-with-moonlight), and that
+    [limits we found safe](../README.md#moonlight), and that
     the PC is added by name (a peer name, or a `# Host =` line): a PC added
     by a local-network address (`10.x`, `172.16.x` to `172.31.x`,
     `192.168.x`) is only safe up to 20 Mbit/s at 720p.

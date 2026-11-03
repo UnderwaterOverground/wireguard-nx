@@ -4,303 +4,131 @@
 [![License](https://img.shields.io/badge/license-GPL--2.0%20%2F%20BSD--3-blue)](#license)
 [![Discord](https://img.shields.io/badge/Discord-join-5865F2?logo=discord&logoColor=white)](https://discord.gg/GjUuBEqRYb)
 
-**WireGuard for the Nintendo Switch.** wireguard-nx runs in the background
-on a Switch with Atmosphère and connects it to your own
-[WireGuard](https://www.wireguard.com) server: the one on your router, NAS
-or PC. Homebrew such as
-[Moonlight](https://github.com/XITRIX/Moonlight-Switch) can then reach your
-PC and the rest of your home network from anywhere, without opening ports
-for each service.
+WireGuard for the Nintendo Switch. Runs in the background on Atmosphère and connects homebrew to your own WireGuard server, so you can use Moonlight, reach your NAS, or access your home network away from home.
 
-> wireguard-nx is an unofficial, community project. "WireGuard" and the
-> "WireGuard" logo are registered trademarks of Jason A. Donenfeld; this
-> project is not affiliated with or endorsed by the WireGuard project or
-> Nintendo.
+No account, relay, or per-app setup. Just a standard WireGuard config.
+
+> Unofficial project. Not affiliated with Nintendo or the WireGuard project. WireGuard and its logo are trademarks of Jason A. Donenfeld.
 
 ## Features
 
-<img src="docs/images/connections.png" align="right" width="280" alt="The overlay's Connections page: each peer with the time of its last handshake">
+<img src="docs/images/connections.png" align="right" width="280" alt="WireGuard connections in Ultrahand">
 
-- **Starts at boot** and stays connected in the background, through sleep
-  and wake.
-- **Homebrew reaches the tunnel:** apps launched from hbmenu can connect
-  to the addresses in your WireGuard config (your server, and whatever
-  networks it routes). Nothing to set up per app.
-- **Plain WireGuard:** copy the `.conf` file any WireGuard server hands out
-  (Unraid, wg-easy, OPNsense, MikroTik, `wg-quick`...) to the SD card.
-  Pre-shared keys, several peers, host names as endpoints and persistent
-  keepalives all work.
-- **Peer names:** a `# Name = gaming-pc` comment in the config names a peer
-  in the overlay and lets Moonlight find it by that name.
-- **Overlay** (Ultrahand): status, the Switch's tunnel address, a pause
-  switch, stop and start, a **Connections** page listing every peer with its
-  last handshake, transfer and endpoint, and a **Config** page to switch
-  between `.conf` files.
-- **Update notice:** a notification at boot when a newer release is out
-  (can be turned off).
-- **Optional:** reach the Switch's [sys-ftpd](https://github.com/cathery/sys-ftpd)
-  through the tunnel.
-- **Small:** exactly 2.5 MB of memory, fixed when it starts.
+- Runs at boot and reconnects after sleep.
+- Works with homebrew launched through hbmenu, including supported home-screen forwarders.
+- Uses regular WireGuard `.conf` files: multiple peers, pre-shared keys, hostnames and keepalives are supported.
+- Ultrahand overlay for connection status, peer handshakes, traffic, pause/start/stop and switching configs.
+- Optional update notifications and [sys-ftpd](https://github.com/cathery/sys-ftpd) access over the tunnel.
+- Fixed 2.5 MB memory usage.
 
-## Before you start
+## Requirements
 
-You need:
+- A Switch running [Atmosphère](https://github.com/Atmosphere-NX/Atmosphere). Tested on a Mariko with Atmosphère 1.12.0 / firmware 22.5.0.
+- [Ultrahand](https://github.com/ppkantorski/Ultrahand-Overlay) for the overlay and notifications (optional, but recommended).
+- A WireGuard server you can add the Switch to. Unraid, UniFi, OPNsense, pfSense, Fritz!Box, wg-easy and `wg-quick` are all fine. For access away from home, the server needs to be reachable over UDP.
 
-- **A Switch with [Atmosphère](https://github.com/Atmosphere-NX/Atmosphere)**
-  custom firmware. If you're not sure what that is, follow the
-  [NH Switch Guide](https://switch.hacks.guide/) first. Tested with
-  Atmosphère 1.12.0 on firmware 22.5.0 (Mariko).
-- **[Ultrahand Overlay](https://github.com/ppkantorski/Ultrahand-Overlay)**.
-  To check you have it, press **L + D-pad Down + R3** (R3 is pressing the
-  right stick in) on the home screen: a menu should appear over the screen.
-  You can do without it, but you'd miss the status screen and notifications.
-- **A WireGuard server** you can add a peer to: the VPN built into many
-  routers and NAS systems (Unraid, Synology, UniFi, OPNsense, pfSense,
-  Fritz!Box, MikroTik), [wg-easy](https://github.com/wg-easy/wg-easy), or
-  `wg-quick` on any Linux box. It needs to be reachable from the internet
-  (a forwarded UDP port) if you want to use the Switch away from home.
+## Installation
 
-## Install
+**1. Download** the ZIP from the [latest release](https://github.com/UnderwaterOverground/wireguard-nx/releases/latest) (**Assets**, not “Source code”).
 
-### 1. Download
+**2. Copy the files** to your Switch SD card. Power the Switch off first.
 
-Open the [latest release](https://github.com/UnderwaterOverground/wireguard-nx/releases/latest)
-and, under **Assets**, download **`wireguard-nx-<version>.zip`** (not "Source
-code"). Unzip it. Inside are three folders: **`atmosphere`**, **`config`**
-and **`switch`**.
+- **Windows:** merge the `atmosphere`, `config` and `switch` folders from the ZIP into the SD card root.
+- **macOS:** don't drag the whole `atmosphere` folder over — Finder may replace the existing one. Copy `atmosphere/contents/4200000000005747` into `atmosphere/contents`, and `switch/.overlays/wireguard-nx.ovl` into `switch/.overlays`. Use **Cmd + Shift + .** to show hidden folders.
 
-### 2. Copy it to the SD card
+You should end up with:
 
-Turn the Switch off (hold the power button, then **Power Options → Turn
-Off**), take out the SD card and put it in your computer.
-
-The SD card already has `atmosphere` and `switch` folders. The new files go
-*inside* them, next to what's already there. Nothing on the card gets
-deleted.
-
-- **Windows:** select the three folders and drag them onto the SD card
-  itself (not into a folder on it). If Windows asks about files with the same
-  name, choose **Replace the files in the destination**.
-- **Mac:** don't drag the three folders onto the card: Finder would
-  *replace* your whole `atmosphere` folder instead of adding to it. Copy
-  these two items one at a time instead:
-
-  | From the zip | Drag it into this folder on the SD card |
-  |---|---|
-  | `atmosphere/contents/4200000000005747` | `atmosphere/contents` |
-  | `switch/.overlays/wireguard-nx.ovl` | `switch/.overlays` |
-
-  Folders starting with a dot are hidden on a Mac: press
-  **Cmd + Shift + .** in Finder to show them. If Finder asks whether to
-  replace an older version, choose **Replace**.
-
-**Check it:** the SD card should now have these two files. If there's a
-folder called `wireguard-nx-…` on the card, the files are in the wrong place:
-move its contents out to the top of the card.
-
-```
+```text
 atmosphere/contents/4200000000005747/exefs.nsp
 switch/.overlays/wireguard-nx.ovl
 ```
 
-### 3. Add the Switch to your WireGuard server
-
-On your server, add a new peer (often called a client or device) for the
-Switch and download or copy its configuration. It's a short text file that
-looks like this:
+**3. Add a peer** for the Switch on your WireGuard server and save the client config it gives you in `config/wireguard-nx` on the SD card. Any name ending `.conf` works. Create the folder if needed. For example:
 
 ```ini
 [Interface]
-PrivateKey = <the Switch's private key>
+PrivateKey = <Switch private key>
 Address = 10.253.0.2/32
 
 [Peer]
 # Name = gaming-pc
-PublicKey = <the server's public key>
+PublicKey = <server public key>
 AllowedIPs = 10.253.0.1/32, 192.168.1.0/24
 Endpoint = home.example.com:51820
 PersistentKeepalive = 25
 ```
 
-Two things worth checking in it:
+The Switch's private key comes from your server: adding a peer makes a new key pair, and the config it gives you already has the private key in it, so copy the file as it is. If your server asks for the Switch's *public* key instead (pfSense, plain `wg`), see [making the keys yourself](docs/SETUP.md#making-the-keys-yourself). Keep the file private: anyone with it can join your network as the Switch.
 
-- **`AllowedIPs`** says what the Switch reaches through the tunnel: the
-  server's own tunnel address, and your home network if the server shares it
-  ("remote access to LAN" on Unraid, "allowed IPs" elsewhere). A plain
-  `0.0.0.0/0` works too (then all of homebrew's internet traffic goes
-  through the server).
-- **`PersistentKeepalive = 25`** keeps the tunnel open through NAT. Add it if
-  it's missing.
+Make sure `AllowedIPs` covers the devices you want to reach. `0.0.0.0/0` routes all homebrew internet traffic through the server. `PersistentKeepalive = 25` helps keep the connection alive through NAT. The optional `# Name` comment gives the peer a name in Ultrahand and Moonlight.
 
-Add a `# Name = ...` comment under `[Peer]` if you like: that's the name the
-overlay shows, and the name Moonlight can use.
+**4. Boot the Switch.** Once Wi-Fi connects, you should get a connection notification. Open Ultrahand with **L + D-pad Down + R3**, then select **WireGuard** to see the tunnel address and how many peers are connected.
 
-Save it as **`wg0.conf`** in the SD card's `config/wireguard-nx` folder
-(create the folder if it isn't there), put the card back in the Switch and
-turn it on as you normally would.
+If it doesn't connect, check the overlay:
 
-### 4. Check it's connected
+- **No config:** missing `.conf` file (or accidentally saved as `.conf.txt`).
+- **Config error:** the overlay shows which line failed.
+- **No handshake yet:** check the endpoint, UDP port, keys and server-side peer. If you're away from home, check port forwarding.
+- **No WireGuard menu:** check that `wireguard-nx.ovl` is in `switch/.overlays`.
 
-1. Within a minute of the Switch connecting to Wi-Fi, a **"Connected. IP:
-   10.x.x.x"** notification appears.
-2. Press **L + D-pad Down + R3** to open Ultrahand and choose **WireGuard**.
-   It shows **Connected** and the Switch's tunnel address. The
-   **Connections** page lists your server with the time of its last
-   handshake.
+More detail in the [setup and troubleshooting guide](docs/SETUP.md).
 
-### It didn't work
+**Updates:** copy the files from the newer ZIP over the old ones and restart. Your configs and settings are kept.
 
-- **No notification after a few minutes:** open the overlay. **No
-  config** means it found no `.conf` to use, and says what to do (a file
-  saved as `wg0.conf.txt` needs renaming, for one). **Config error** names
-  the line of the `.conf` it couldn't read. **Connecting...**
-  with "No handshake yet" means the server didn't answer: check the
-  endpoint and port (and that the port is forwarded if you're away from
-  home), the keys, and that the server has the Switch as a peer.
-- **There's no WireGuard in Ultrahand's menu:** `wireguard-nx.ovl` isn't in
-  `switch/.overlays`.
-- **Something else:** see [troubleshooting](docs/SETUP.md#troubleshooting).
+## Moonlight
 
-### Updating
+Add your PC by its WireGuard peer name or an IP reachable through the tunnel. **Using a name works better**, because Moonlight otherwise treats private IPs as local and sends packets large enough to require fragmentation.
 
-Download the new zip and copy it over the old files the same way. Your
-configuration and settings are kept. Restart the Switch afterwards.
+These are the bitrates I found reliable at 60 FPS, tested against full-screen moving noise:
 
-The [setup guide](docs/SETUP.md) covers setting up a peer on common servers,
-several configurations, all the settings, sys-ftpd and more.
-
-## Using it with Moonlight
-
-Add your PC in Moonlight by its peer name (e.g. `gaming-pc`) or by an
-address the tunnel reaches (its address on your home network, if the server
-routes that network). At home, Moonlight may find the PC on the local
-network and use that instead, which is fine. Away from home, it uses the
-tunnel.
-
-Use a name if you can. Our testing found these bitrates safe, at 60 FPS
-with a worst-case picture (full-screen moving noise):
-
-| Resolution | PC added by name | PC added by a `10.x`, `172.16.x` to `172.31.x` or `192.168.x` address |
+| Resolution | Added by name | Added by private IP |
 |---|---|---|
-| 720p | up to 25 Mbit/s | up to 20 Mbit/s |
-| 1080p | up to 20 Mbit/s | not recommended: use 720p |
+| 720p | 25 Mbit/s | 20 Mbit/s |
+| 1080p | 20 Mbit/s | Use 720p instead |
 
-The name matters because Moonlight sends bigger video packets to addresses
-that look local. Those are too big to go through the tunnel whole, so each
-one is split in two, which doubles the work for the Switch. A name leads
-Moonlight to a stand-in address instead (`100.127.0.1` for `10.253.0.1`:
-the last two numbers are kept), which it treats as remote, so it sends
-packets that fit, and wireguard-nx swaps the real address in on the way
-out.
-
-Peers are named by their `# Name = ...` comment. To name a PC elsewhere on
-the server's home network, add a line like this anywhere in the `.conf`
-(its address must be inside a peer's `AllowedIPs`), and add the PC in
-Moonlight as `gaming-pc`:
+To name a peer, put `# Name = gaming-pc` under its `[Peer]` entry. If the PC is elsewhere on your server's LAN, add this anywhere in the config (the IP must be covered by `AllowedIPs`):
 
 ```ini
 # Host = gaming-pc 192.168.1.50
 ```
 
-Set the bitrate in Moonlight's settings. Artemis picks 35 Mbit/s for 1080p,
-so lower it to 20.
+Then add `gaming-pc` in Moonlight. wireguard-nx maps it to a stand-in address so Moonlight uses smaller packets. Names are written to Atmosphère's hosts file, so there needs to be one in `atmosphere/hosts` (most setups have one already). Artemis defaults to 35 Mbit/s at 1080p; lower that to 20.
 
-## Several configurations
+## Multiple configs
 
-Put more than one `.conf` in `config/wireguard-nx` (say `home.conf` and
-`away.conf`) and pick one on the overlay's **Config** page. It switches at
-once and stays the choice at the next boot.
+Put additional `.conf` files in `config/wireguard-nx` and switch between them from Ultrahand's **Config** page. The selection is remembered after reboot.
 
-## Known limitations
+## Limitations
 
-- **Homebrew only**: apps launched from hbmenu or another homebrew launcher,
-  and home-screen forwarders (those with title IDs starting `01` need
-  listing in `mitm_titles`, see the
-  [setup guide](docs/SETUP.md#home-screen-forwarders)). Games and Nintendo's
-  apps don't use the tunnel.
-- **One tunnel at a time**, and the Switch connects to the server over
-  **IPv4 only** (IPv6 addresses inside the tunnel work).
-- **No DNS through the tunnel:** `DNS =` in the config is ignored. Peer
-  names from `# Name = ...` comments resolve; other names don't.
-- **Addresses on the Switch's own Wi-Fi network are reached directly**, not
-  through the tunnel, even when `AllowedIPs` covers them (as on any
-  computer: the local network is nearer). Away from home they go through
-  the tunnel.
-- To stop wireguard-nx while it runs, use **Stop** in its own overlay
-  (close homebrew apps first). The Sysmodules overlay can't stop it: turning
-  it off there takes a restart.
-- Tested on one Mariko Switch. Reports from other models and firmware
-  versions are welcome.
+- **Homebrew only.** Games and Nintendo services don't use the tunnel. Home-screen forwarders with title IDs starting `01` need an entry in `mitm_titles` ([instructions](docs/SETUP.md#home-screen-forwarders)).
+- One tunnel at a time. Server connections use IPv4; IPv6 *inside* the tunnel works.
+- Tunnel DNS isn't supported. `DNS =` is ignored; `# Name` and `# Host` entries work instead.
+- Devices on the Switch's current Wi-Fi network are reached directly, not through the tunnel.
+- Use **Stop** in the WireGuard overlay to stop it without rebooting (close homebrew first). Disabling it in Sysmodules requires a restart.
+- Tested on one Mariko Switch so far. Reports from other models are welcome.
 
-## Questions
+## FAQ
 
-**Does it affect games or online play?** No. It only handles traffic from
-homebrew to the addresses in your configuration. It doesn't change how games
-or Nintendo services connect, and Atmosphère's DNS blocking of Nintendo
-servers is left in place.
+**Will this affect online games or Nintendo services?** No. It only handles homebrew traffic to configured addresses, and leaves Atmosphère's Nintendo-server blocking alone.
 
-**Can I use it with Tailscale?** That's what
-[tailscale-nx](https://github.com/UnderwaterOverground/tailscale-nx) is
-for. Both can be installed, but only one can serve homebrew at a time: turn
-the other one off in Sysmodules.
+**Can I run it alongside tailscale-nx?** Both can be installed, but only one can handle homebrew at a time. Disable the other in Sysmodules.
 
-**The console crashes (orange screen) when I wake it during a Moonlight
-stream.** That's a Moonlight-Switch bug
-([#306](https://github.com/XITRIX/Moonlight-Switch/issues/306)), and it
-happens with wireguard-nx turned off too. Until it's fixed, end the stream
-before putting the console to sleep.
+**Orange screen when waking during a Moonlight stream?** That's a [Moonlight-Switch issue](https://github.com/XITRIX/Moonlight-Switch/issues/306), also reproducible without wireguard-nx. End the stream before putting the Switch to sleep.
 
-**Artemis won't open a second time.** After a stream, Artemis can't start
-again from the same hbmenu session, with or without wireguard-nx. Close
-hbmenu from the HOME menu and open it again.
+**Artemis won't launch twice?** Close hbmenu from HOME and reopen it. This happens without wireguard-nx too.
 
-**Is my traffic private?** Traffic to the addresses in your configuration
-is encrypted end to end with WireGuard, between the Switch and your server.
-Nothing goes anywhere else: there's no account and no relay. The only other
-connection wireguard-nx makes is the update check to GitHub, which you can
-turn off.
+**Is the connection private?** WireGuard encrypts traffic between the Switch and your server. There's no account or relay. The optional update check contacts GitHub.
 
-**Something's wrong.** See [troubleshooting](docs/SETUP.md#troubleshooting).
-For help, ask on [Discord](https://discord.gg/GjUuBEqRYb) or
-[open an issue](https://github.com/UnderwaterOverground/wireguard-nx/issues).
-Please include the log, `config/wireguard-nx/sysmodule.log` on the SD card.
+**Need help?** Check the [troubleshooting guide](docs/SETUP.md#troubleshooting), join [Discord](https://discord.gg/GjUuBEqRYb), or [open an issue](https://github.com/UnderwaterOverground/wireguard-nx/issues). Include `config/wireguard-nx/sysmodule.log` if reporting a bug.
 
-## Building
+## Building and credits
 
-See [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md). Everything builds in Docker,
-and most of it can be tested on a computer without a Switch.
+Build instructions are in [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md). The build runs in Docker, and most tests don't need a Switch.
 
-## Credits
+Forked from [tailscale-nx](https://github.com/UnderwaterOverground/tailscale-nx), replacing the Tailscale integration with plain WireGuard. Uses [tailscale-rs](https://github.com/tailscale/tailscale-rs), [libstratosphere](https://github.com/Atmosphere-NX/Atmosphere), [libnx](https://github.com/switchbrew/libnx), [libtesla](https://github.com/WerWolv/libtesla), [smoltcp](https://github.com/smoltcp-rs/smoltcp), [rustls](https://github.com/rustls/rustls) and [RustCrypto](https://github.com/RustCrypto). Also drew on [sys-GRID0](https://github.com/redluigi323/sys-GRID0), [ryu_ldn_nx](https://github.com/Ethiquema/ryu_ldn_nx) and [chrisbraucker's earlier wireguard-nx](https://github.com/chrisbraucker/wireguard-nx).
 
-wireguard-nx is a fork of
-[tailscale-nx](https://github.com/UnderwaterOverground/tailscale-nx), with
-the Tailscale parts replaced by plain WireGuard. It builds on:
-- **[tailscale-rs](https://github.com/tailscale/tailscale-rs):** Tailscale's
-  Rust WireGuard implementation (`ts_tunnel`) and key types.
-- **Libraries:**
-  - [Atmosphère](https://github.com/Atmosphere-NX/Atmosphere)'s libstratosphere
-  - [libnx](https://github.com/switchbrew/libnx)
-  - [libtesla](https://github.com/WerWolv/libtesla)
-  - [smoltcp](https://github.com/smoltcp-rs/smoltcp)
-  - [rustls](https://github.com/rustls/rustls)
-  - [RustCrypto](https://github.com/RustCrypto)
-- **Ideas:** from [sys-GRID0](https://github.com/redluigi323/sys-GRID0),
-  [ryu_ldn_nx](https://github.com/Ethiquema/ryu_ldn_nx) and
-  [chrisbraucker's wireguard-nx](https://github.com/chrisbraucker/wireguard-nx),
-  an earlier, unrelated project of the same name.
-
-See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for licences.
+See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for third-party licences.
 
 ## License
 
-- **The project** is licensed under the GNU General Public License v2.0 or
-  later ([LICENSE](LICENSE)). This covers the sysmodule, the overlay and the
-  socket layer, which link GPL-2.0 libraries.
-- **The Rust engine** in `crates/` is licensed under the BSD 3-Clause
-  License ([crates/LICENSE](crates/LICENSE)), like the tailscale-rs code it
-  builds on.
-
-## Found it useful?
-
-If wireguard-nx helped you, a ⭐ on the repo is always appreciated. It's how
-we know it's helping someone.
+The sysmodule, overlay and socket layer are GPL-2.0-or-later ([LICENSE](LICENSE)). The Rust engine under `crates/` is BSD-3-Clause ([crates/LICENSE](crates/LICENSE)).
