@@ -385,6 +385,35 @@ namespace ams {
             return std::strcmp(name + n - 5, ".conf") == 0;
         }
 
+        // A config saved as wg0.conf.txt (Windows hides extensions) becomes
+        // wg0.conf, unless that exists already.
+        void RenameTxtConfs() {
+            constexpr int Max = 4;
+            char names[Max][WGNX_CTL_CONF_NAME_MAX + 4] = {};
+            int found = 0;
+            fs::DirectoryHandle dir;
+            if (R_FAILED(fs::OpenDirectory(std::addressof(dir), ConfigDir, fs::OpenDirectoryMode_File))) return;
+            {
+                ON_SCOPE_EXIT { fs::CloseDirectory(dir); };
+                static fs::DirectoryEntry entry;
+                s64 got = 0;
+                while (found < Max && R_SUCCEEDED(fs::ReadDirectory(std::addressof(got), std::addressof(entry), dir, 1)) && got == 1) {
+                    const size_t n = std::strlen(entry.name);
+                    if (n > 9 && n < sizeof names[0] && strcasecmp(entry.name + n - 9, ".conf.txt") == 0)
+                        util::SNPrintf(names[found++], sizeof names[0], "%s", entry.name);
+                }
+            }
+            for (int i = 0; i < found; i++) {
+                char from[96], to[96];
+                util::SNPrintf(from, sizeof from, "%s/%s", ConfigDir, names[i]);
+                const size_t n = std::strlen(names[i]);
+                util::SNPrintf(to, sizeof to, "%s/%.*s.conf", ConfigDir, static_cast<int>(n - 9), names[i]);
+                if (!ValidConfName(std::strrchr(to, '/') + 1)) continue;
+                if (R_SUCCEEDED(fs::RenameFile(from, to))) Log("config: renamed %s to %s", names[i], std::strrchr(to, '/') + 1);
+                else Log("config: cannot rename %s (is there a .conf with that name already?)", names[i]);
+            }
+        }
+
         // Which .conf to use: config.ini's, else the only one there is, else
         // wg0.conf.
         void SelectConf(const Config &cfg, char *out, size_t cap) {
@@ -1239,6 +1268,7 @@ namespace ams {
             ::wgnx::VSock::SetTunnelLan(true);
         }
         char conf_name[WGNX_CTL_CONF_NAME_MAX];
+        RenameTxtConfs();
         SelectConf(cfg, conf_name, sizeof conf_name);
         // A broken or missing .conf isn't fatal: the overlay shows why and
         // offers the others.

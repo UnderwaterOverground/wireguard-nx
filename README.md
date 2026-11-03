@@ -66,7 +66,7 @@ Make sure `AllowedIPs` covers the devices you want to reach. `0.0.0.0/0` routes 
 
 If it doesn't connect, check the overlay:
 
-- **No config:** missing `.conf` file (or accidentally saved as `.conf.txt`).
+- **No config:** no `.conf` file in `config/wireguard-nx`. (One saved as `.conf.txt` is fine: it's renamed at boot.)
 - **Config error:** the overlay shows which line failed.
 - **No handshake yet:** check the endpoint, UDP port, keys and server-side peer. If you're away from home, check port forwarding.
 - **No WireGuard menu:** check that `wireguard-nx.ovl` is in `switch/.overlays`.

@@ -271,9 +271,10 @@ limit.
 
 - **The overlay says "No config".**
   - There's no `.conf` to use in `config/wireguard-nx`, and the message says
-    what to do: copy one there, rename one saved as `wg0.conf.txt` (Windows
-    hides the `.txt` by default), or, if `config.ini`'s `conf=` names a file
+    what to do: copy one there, or, if `config.ini`'s `conf=` names a file
     that isn't there, pick one of the others on the Config page.
+  - A file saved as `wg0.conf.txt` (Windows hides the `.txt` by default) is
+    renamed to `wg0.conf` at boot, so it works as it is.
 - **The overlay says "Config error".**
   - It names the `.conf` and the line it couldn't read (a key that isn't
     valid base64, a missing `PrivateKey` or `Address`, an unknown setting).
