@@ -16,9 +16,16 @@
 //! reason cookie replies are handled here and never reach ts_tunnel: the
 //! cookie is sealed against the `mac1` the peer actually saw, which is ours.
 //!
+//! AmneziaWG 3 adds header protection (`HeaderProtectionKey`, a shared
+//! 32-byte key): the first 12 bytes of a message's random prefix are the
+//! nonce of a ChaCha20 keystream that is XORed over the whole handshake
+//! message, or over the 16-byte header of a transport message, so no
+//! low-entropy WireGuard field is left on the wire. It needs every `S` to
+//! be at least 12. That happens last on the way out and first on the way
+//! in, around everything above.
+//!
 //! Reference: amneziawg-go, `device/{send,receive,noise-protocol,obf*}.go`.
-//! Not covered: AmneziaWG 3's header protection (`HeaderProtectionKey`),
-//! random trailers and custom timings.
+//! Not covered: AmneziaWG 3's random trailers and custom timings.
 
 use alloc::format;
 use alloc::string::{String, ToString};
@@ -28,6 +35,8 @@ use core::time::Duration;
 use blake2::digest::consts::U16;
 use blake2::digest::Mac as _;
 use blake2::{Blake2s256, Blake2sMac, Digest};
+use chacha20::cipher::{KeyIvInit, StreamCipher};
+use chacha20::ChaCha20;
 use chacha20poly1305::aead::{Aead, Payload};
 use chacha20poly1305::XChaCha20Poly1305;
 
@@ -35,6 +44,11 @@ use crate::time::Instant;
 
 /// Wire sizes of the four message types (the transport one is a minimum).
 const SIZES: [usize; 4] = [148, 92, 64, 32];
+/// What header protection encrypts: a whole handshake message, but only
+/// the type, receiver and counter of a transport message.
+const PROTECTED: [usize; 4] = [148, 92, 64, 16];
+/// The prefix bytes that are the header-protection nonce.
+pub const HEADER_NONCE: usize = 12;
 /// WireGuard's cookie lifetime.
 const COOKIE_LIFETIME: Duration = Duration::from_secs(120);
 /// Largest junk or signature datagram, and the most junk per handshake:
@@ -226,11 +240,13 @@ pub struct Params {
     pub header: [Range; 4],
     /// `I1`..`I5`, in that order, the ones that are set.
     pub signatures: Vec<Signature>,
+    /// `HeaderProtectionKey` (AmneziaWG 3).
+    pub header_key: Option<[u8; 32]>,
 }
 
 impl Default for Params {
     fn default() -> Self {
-        Self { junk_count: 0, junk_min: 0, junk_max: 0, prefix: [0; 4], header: [Range::one(1), Range::one(2), Range::one(3), Range::one(4)], signatures: Vec::new() }
+        Self { junk_count: 0, junk_min: 0, junk_max: 0, prefix: [0; 4], header: [Range::one(1), Range::one(2), Range::one(3), Range::one(4)], signatures: Vec::new(), header_key: None }
     }
 }
 
@@ -248,7 +264,7 @@ pub enum Inbound {
 impl Params {
     /// Nothing to do on the wire: every setting at its WireGuard value.
     pub fn is_plain(&self) -> bool {
-        self.junk_count == 0 && self.prefix == [0; 4] && self.header == Self::default().header && self.signatures.is_empty()
+        self.junk_count == 0 && self.prefix == [0; 4] && self.header == Self::default().header && self.signatures.is_empty() && self.header_key.is_none()
     }
 
     pub fn validate(&self) -> Result<(), String> {
@@ -264,6 +280,9 @@ impl Params {
         for (i, (s, max)) in self.prefix.iter().zip(MAX_PREFIX).enumerate() {
             if *s > max {
                 return Err(format!("S{} {s}: the most is {max}", i + 1));
+            }
+            if self.header_key.is_some() && usize::from(*s) < HEADER_NONCE {
+                return Err(format!("S{} {s}: HeaderProtectionKey needs S1-S4 of at least {HEADER_NONCE}", i + 1));
             }
         }
         for i in 0..4 {
@@ -281,11 +300,12 @@ impl Params {
         let [s1, s2, s3, s4] = self.prefix;
         let [h1, h2, h3, h4] = self.header;
         format!(
-            "Jc={} Jmin={} Jmax={} S1={s1} S2={s2} S3={s3} S4={s4} H1={h1} H2={h2} H3={h3} H4={h4} I={}",
+            "Jc={} Jmin={} Jmax={} S1={s1} S2={s2} S3={s3} S4={s4} H1={h1} H2={h2} H3={h3} H4={h4} I={} header protection {}",
             self.junk_count,
             self.junk_min,
             self.junk_max,
-            self.signatures.len()
+            self.signatures.len(),
+            if self.header_key.is_some() { "on" } else { "off" }
         )
     }
 
@@ -320,6 +340,9 @@ impl Params {
         if t <= 2 {
             peer.write_macs(&mut out[s..], now);
         }
+        if let Some(mut cipher) = self.header_cipher(&out) {
+            cipher.apply_keystream(&mut out[s..s + PROTECTED[t - 1]]);
+        }
         out
     }
 
@@ -328,14 +351,16 @@ impl Params {
     pub fn unwrap(&self, data: &[u8], me: &MyMacs) -> Inbound {
         let Some(t) = self.classify(data) else { return Inbound::Junk };
         let s = self.prefix[t - 1] as usize;
-        let body = &data[s..];
-        if t <= 2 && !me.mac1_ok(body) {
+        let mut msg = data[s..].to_vec();
+        if let Some(mut cipher) = self.header_cipher(data) {
+            cipher.apply_keystream(&mut msg[..PROTECTED[t - 1]]);
+        }
+        if t <= 2 && !me.mac1_ok(&msg) {
             return Inbound::Junk;
         }
         if t == 3 {
-            return Inbound::CookieReply { nonce: body[8..32].try_into().unwrap(), sealed: body[32..64].try_into().unwrap() };
+            return Inbound::CookieReply { nonce: msg[8..32].try_into().unwrap(), sealed: msg[32..64].try_into().unwrap() };
         }
-        let mut msg = body.to_vec();
         msg[..4].copy_from_slice(&(t as u32).to_le_bytes());
         if t <= 2 {
             me.write_mac1(&mut msg);
@@ -345,13 +370,36 @@ impl Params {
 
     /// Which message type a datagram is, by its size and header: exact
     /// sizes for the handshake messages, a minimum for transport data.
+    /// Under header protection the header is read through the keystream
+    /// (the same first 4 bytes of it whichever prefix it sits behind).
     fn classify(&self, data: &[u8]) -> Option<usize> {
+        let mut mask = [0u8; 4];
+        if let Some(mut cipher) = self.header_cipher(data) {
+            cipher.apply_keystream(&mut mask);
+        } else if self.header_key.is_some() {
+            return None;
+        }
         (1..=4).find(|&t| {
             let s = self.prefix[t - 1] as usize;
             let size = s + SIZES[t - 1];
             let fits = if t == 4 { data.len() >= size } else { data.len() == size };
-            fits && self.header[t - 1].contains(u32::from_le_bytes(data[s..s + 4].try_into().unwrap()))
+            fits && {
+                let mut h: [u8; 4] = data[s..s + 4].try_into().unwrap();
+                for (b, m) in h.iter_mut().zip(mask) {
+                    *b ^= m;
+                }
+                self.header[t - 1].contains(u32::from_le_bytes(h))
+            }
         })
+    }
+
+    /// The header-protection keystream for a datagram, whose first
+    /// [`HEADER_NONCE`] bytes are the nonce. None without a key, or for a
+    /// datagram too short to carry one.
+    fn header_cipher(&self, datagram: &[u8]) -> Option<ChaCha20> {
+        let key = self.header_key.as_ref()?;
+        let nonce: &[u8; HEADER_NONCE] = datagram.get(..HEADER_NONCE)?.try_into().ok()?;
+        Some(ChaCha20::new(key.into(), nonce.into()))
     }
 }
 
@@ -446,7 +494,13 @@ mod tests {
             prefix: [7, 9, 3, 5],
             header: [Range { lo: 11, hi: 20 }, Range::one(30), Range { lo: 40, hi: 41 }, Range { lo: 1000, hi: 2000 }],
             signatures: vec![Signature::parse("<b 0x16><r 10>").unwrap()],
+            header_key: None,
         }
+    }
+
+    /// AmneziaWG 3: the same, with prefixes long enough for a nonce and a key.
+    fn protected() -> Params {
+        Params { prefix: [12, 20, 16, 13], header_key: Some([9; 32]), ..params() }
     }
 
     /// A standard-form message of type `t`, with a valid mac1 for `to`.
@@ -645,5 +699,80 @@ mod tests {
         // Cookies expire.
         let later = p.wrap(&message(1, 148, &SERVER), &mut to_server, now + Duration::from_secs(121));
         assert_eq!(&later[later.len() - 16..], &[0; 16]);
+    }
+
+    /// The keystream as amneziawg-go derives it (ChaCha20, IETF nonce, counter 0).
+    fn keystream(key: &[u8; 32], nonce: &[u8], n: usize) -> Vec<u8> {
+        let mut out = vec![0u8; n];
+        ChaCha20::new(key.into(), nonce[..12].into()).apply_keystream(&mut out);
+        out
+    }
+
+    #[test]
+    fn header_protection_hides_every_message_and_round_trips() {
+        crate::rng::seed(&[9; 32]);
+        let p = protected();
+        let now = Instant::from_nanos(1_000_000_000);
+        let mut to_server = PeerMacs::new(&SERVER);
+        let server = MyMacs::new(&SERVER);
+        let key = p.header_key.unwrap();
+        for (t, len, s) in [(1u8, 148usize, 12usize), (2, 92, 20), (3, 64, 16), (4, 32, 13), (4, 1400, 13)] {
+            let std = message(t, len, &SERVER);
+            let wire = p.wrap(&std, &mut to_server, now);
+            assert_eq!(wire.len(), s + len, "type {t}");
+            // The nonce is the start of the prefix; under the keystream the
+            // header is in range, and the plain header value never shows.
+            let ks = keystream(&key, &wire[..12], len);
+            let h = u32::from_le_bytes([wire[s] ^ ks[0], wire[s + 1] ^ ks[1], wire[s + 2] ^ ks[2], wire[s + 3] ^ ks[3]]);
+            assert!(p.header[usize::from(t) - 1].contains(h), "type {t}: {h}");
+            assert_eq!(p.classify(&wire), Some(usize::from(t)));
+            let covered = if t == 4 { 16 } else { len };
+            assert_eq!(&wire[s + covered..], &std[covered..], "type {t}: only {covered} bytes are encrypted");
+            let decrypted: Vec<u8> = wire[s..s + covered].iter().zip(&ks).map(|(a, b)| a ^ b).collect();
+            if t <= 2 {
+                assert!(server.mac1_ok(&[&decrypted[..], &wire[s + covered..]].concat()), "mac1 covers the disguised, unencrypted message");
+            }
+            match (t, p.unwrap(&wire, &server)) {
+                (3, Inbound::CookieReply { nonce, sealed }) => {
+                    assert_eq!(nonce[..], std[8..32]);
+                    assert_eq!(sealed[..], std[32..64]);
+                }
+                (3, other) => panic!("cookie reply came back as {other:?}"),
+                (_, got) => assert_eq!(got, Inbound::Message(std.clone()), "type {t}"),
+            }
+        }
+    }
+
+    #[test]
+    fn header_protection_keys_must_match() {
+        crate::rng::seed(&[10; 32]);
+        let p = protected();
+        let now = Instant::from_nanos(1_000_000_000);
+        let server = MyMacs::new(&SERVER);
+        let init = p.wrap(&message(1, 148, &SERVER), &mut PeerMacs::new(&SERVER), now);
+        let data = p.wrap(&message(4, 100, &SERVER), &mut PeerMacs::new(&SERVER), now);
+        let mut other = protected();
+        other.header_key = Some([10; 32]);
+        let mut none = protected();
+        none.header_key = None;
+        for q in [other, none] {
+            assert_eq!(q.unwrap(&init, &server), Inbound::Junk);
+            assert_eq!(q.unwrap(&data, &server), Inbound::Junk);
+            assert_eq!(p.unwrap(&q.wrap(&message(1, 148, &SERVER), &mut PeerMacs::new(&SERVER), now), &server), Inbound::Junk);
+        }
+        // A flipped bit anywhere in a handshake message fails mac1.
+        let mut bad = init.clone();
+        bad[12 + 60] ^= 1;
+        assert_eq!(p.unwrap(&bad, &server), Inbound::Junk);
+        assert_eq!(p.unwrap(&init[..11], &server), Inbound::Junk);
+        assert_eq!(p.unwrap(&[], &server), Inbound::Junk);
+        // Short prefixes can't carry the nonce.
+        let mut short = protected();
+        short.prefix[2] = 11;
+        assert_eq!(short.validate(), Err("S3 11: HeaderProtectionKey needs S1-S4 of at least 12".to_string()));
+        assert!(protected().validate().is_ok());
+        assert!(!protected().is_plain());
+        assert!(protected().summary().ends_with("header protection on"));
+        assert!(params().summary().ends_with("header protection off"));
     }
 }

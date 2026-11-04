@@ -753,6 +753,7 @@ mod tests {
             prefix: [15, 22, 4, 8],
             header: [awg::Range { lo: 100, hi: 200 }, awg::Range::one(300), awg::Range::one(400), awg::Range { lo: 500, hi: 600 }],
             signatures: alloc::vec![awg::Signature::parse("<b 0x474554><r 8>").unwrap()],
+            header_key: None,
         }
     }
 
@@ -935,6 +936,36 @@ mod tests {
         a.advance(Duration::from_secs(6));
         assert_eq!(a.b.peers_info()[0].rx_bytes, rx + 15 + 148, "the retry reached B");
         assert!(a.a.peers_info()[0].tx_bytes >= tx + 11 + 3 * 40 + 15 + 148, "with junk ahead of it");
+    }
+
+    #[test]
+    fn amneziawg_header_protection_handshakes_and_carries_data() {
+        let hp = || awg::Params { prefix: [12, 22, 16, 13], header_key: Some([7; 32]), ..awg_params() };
+        let mut p = Pair::client_server_awg(hp(), hp());
+        assert!(Pair::events(&mut p.a).iter().any(|e| matches!(e, Event::Log(s) if s.ends_with("header protection on"))));
+        let mut burst = Vec::new();
+        while let Some(Io::SendUdp { data, .. }) = p.a.poll_io() {
+            burst.push(data);
+        }
+        let init = burst.last().unwrap();
+        assert_eq!(init.len(), 12 + 148);
+        // The header is encrypted: the H1 value is not there to be read.
+        assert!(!(100..=200).contains(&u32::from_le_bytes(init[12..16].try_into().unwrap())));
+        for d in burst {
+            p.b.handle_udp(p.a_src, &d, p.now);
+        }
+        p.shuttle();
+        assert!(Pair::events(&mut p.a).contains(&Event::Handshake { peer: 0 }));
+        assert!(Pair::events(&mut p.b).contains(&Event::Handshake { peer: 0 }));
+        assert!(udp_echo(&mut p));
+        assert_eq!(p.a.mtu(), DEFAULT_MTU - 13);
+        // The same parameters with another key, or none, get nowhere.
+        for b in [awg::Params { header_key: Some([8; 32]), ..hp() }, awg::Params { header_key: None, ..hp() }] {
+            let mut q = Pair::client_server_awg(hp(), b);
+            q.shuttle();
+            q.advance(Duration::from_secs(12));
+            assert!(!q.a.peers_info()[0].session && !q.b.peers_info()[0].session);
+        }
     }
 
     #[test]

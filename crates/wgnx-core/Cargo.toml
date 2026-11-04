@@ -13,6 +13,7 @@ switch-limits = []
 
 [dependencies]
 chacha20poly1305.workspace = true
+chacha20.workspace = true
 x25519-dalek.workspace = true
 blake2.workspace = true
 rustls.workspace = true

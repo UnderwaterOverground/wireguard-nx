@@ -16,8 +16,8 @@
 //! comments may start with "Host" too.
 //!
 //! AmneziaWG's `[Interface]` keys (`Jc`, `Jmin`, `Jmax`, `S1`..`S4`,
-//! `H1`..`H4`, `I1`..`I5`) are accepted as amneziawg-tools writes them; see
-//! [`crate::awg`].
+//! `H1`..`H4`, `I1`..`I5`, `HeaderProtectionKey`) are accepted as
+//! amneziawg-tools writes them; see [`crate::awg`].
 
 use alloc::format;
 use alloc::string::{String, ToString};
@@ -302,7 +302,7 @@ pub fn parse(text: &str) -> Result<WgConfig, ParseError> {
                     "i1" | "i2" | "i3" | "i4" | "i5" => {
                         b.signatures[slot(&key)] = Some(crate::awg::Signature::parse(value).map_err(|m| err(line_no, format!("{}: {m}", upper(&key))))?);
                     }
-                    "headerprotectionkey" => return Err(err(line_no, "HeaderProtectionKey: AmneziaWG header protection isn't supported".into())),
+                    "headerprotectionkey" => b.awg.header_key = Some(key32(value).map_err(|m| err(line_no, format!("HeaderProtectionKey: {m}")))?),
                     k if IGNORED_INTERFACE_KEYS.contains(&k) => log::debug!("conf: ignoring {k}"),
                     k => return Err(err(line_no, format!("unknown [Interface] key {k:?}"))),
                 }
@@ -679,7 +679,13 @@ mod tests {
         assert_eq!(e("S4 = 70000").msg, "S4: bad value \"70000\"");
         assert_eq!(e("S4 = 900").msg, "AmneziaWG: S4 900: the most is 844");
         assert_eq!(e("I1 = <zz 3>"), ParseError { line: 4, msg: "I1: unknown tag <zz>".into() });
-        assert!(e("HeaderProtectionKey = 00").msg.contains("isn't supported"));
+        // AmneziaWG 3: a header protection key, which needs S1-S4 >= 12.
+        let text = format!("[Interface]\nPrivateKey = {KEY_A}\nAddress = 10.0.0.2\nS1 = 12\nS2 = 30\nS3 = 16\nS4 = 14\nHeaderProtectionKey = {KEY_B}\n[Peer]\nPublicKey = {KEY_B}\n");
+        let a = parse(&text).unwrap().interface.awg;
+        assert_eq!(a.header_key, Some(key32(KEY_B).unwrap()));
+        assert!(!a.is_plain());
+        assert_eq!(e("HeaderProtectionKey = 00"), ParseError { line: 4, msg: "HeaderProtectionKey: not valid base64".into() });
+        assert_eq!(e(&format!("S1 = 12\nS2 = 12\nS3 = 12\nHeaderProtectionKey = {KEY_B}")).msg, "AmneziaWG: S4 0: HeaderProtectionKey needs S1-S4 of at least 12");
     }
 
     #[test]
