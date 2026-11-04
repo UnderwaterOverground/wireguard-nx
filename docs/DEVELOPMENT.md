@@ -20,7 +20,7 @@ machine, without a console), and what we learned along the way.
 | `switch/app` | `wgnx-app.nro`: the engine in a homebrew app, with status, an echo self-test and a crypto benchmark (developer tool) |
 | `switch/speedtest` | `speedtest.nro`: throughput, socket call costs and SD card writes through the sysmodule, against `tools/speedtest-server.py` (developer tool) |
 | `third_party/tailscale-rs` | Vendored, `no_std`-ported crates from tailscale-rs (BSD-3): `ts_tunnel`, `ts_noise`, `ts_keys`, `ts_packet`, `ts_time`, `ts_util`. See `VENDORED.md`. |
-| `e2e/` | Two stock WireGuard peers (the Docker VM's kernel WireGuard through `wg-quick`) with TCP/UDP echo (port 7), HTTP (8080) and iperf3 (5201), plus an AmneziaWG peer (amneziawg-go built from source). `run-tests.sh` is the automated suite. |
+| `e2e/` | Two stock WireGuard peers (the Docker VM's kernel WireGuard through `wg-quick`) with TCP/UDP echo (port 7), HTTP (8080) and iperf3 (5201), plus an AmneziaWG peer (amneziawg-go built from source) with a plain and a header-protected interface. `run-tests.sh` is the automated suite. |
 
 ## Build and test
 
@@ -51,6 +51,7 @@ make e2e              # local WireGuard peers + the full end-to-end suite (Docke
 - a broken `.conf` reported with its line, with the shim staying out of the way
 - `wgnx-c --sleep-test`: echo again right after suspend/resume (the console's wake path)
 - AmneziaWG: echo and handshake against amneziawg-go with junk, padding and disguised headers; the same keys without them refused
+- AmneziaWG 3 header protection: echo, handshake and the UDP/TCP throughput tests through it; the same parameters without the key refused
 
 Typical results on a Mac's Docker VM: 50 Mbit/s UDP at 0% loss; about 590 Mbit/s TCP up.
 
@@ -69,10 +70,11 @@ On the Mac itself, two engines can talk through real sockets: make two
 confs with `wgnx-host genkey`, run `wgnx-host up --conf b.conf` (with a
 `ListenPort`) and `wgnx-host up --conf a.conf --expect-handshake`.
 
-The AmneziaWG peer's port is published on the host as UDP 51821, so a
-console on the same network can test against it: copy
-`e2e/state/awg-switch.conf` to the SD card (its `Endpoint` is this
-machine's address; set `WGNX_LAN_IP` before `setup.sh` if it guessed wrong).
+The AmneziaWG peer's ports are published on the host (UDP 51821 for `awg0`,
+51822 for the header-protected `awg1`), so a console on the same network can
+test against it: copy `e2e/state/awgswitch.conf` or `awghpswitch.conf` to
+the SD card (its `Endpoint` is this machine's address; set `WGNX_LAN_IP`
+before `setup.sh` if it guessed wrong).
 
 The sysmodule's boot-time update check (`native/driver/wgnx_update.c`) runs
 the same way against the real GitHub. Pass the version to compare with:

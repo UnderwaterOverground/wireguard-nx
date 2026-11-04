@@ -101,9 +101,9 @@ Put additional `.conf` files in `config/wireguard-nx` and switch between them fr
 
 ## AmneziaWG
 
-A config from the Amnezia app or `amneziawg-tools` works unchanged: the `Jc`/`Jmin`/`Jmax`, `S1`–`S4`, `H1`–`H4` and `I1`–`I5` settings are read from `[Interface]` and the Switch sends junk, padded handshakes and disguised headers exactly as the server expects. Nothing else changes. A config without those keys is plain WireGuard.
+A config from the Amnezia app or `amneziawg-tools` works unchanged: the `Jc`/`Jmin`/`Jmax`, `S1`–`S4`, `H1`–`H4`, `I1`–`I5` and `HeaderProtectionKey` settings are read from `[Interface]` and the Switch sends junk, padded handshakes, disguised headers and, with a key, encrypted headers exactly as the server expects. Nothing else changes. A config without those keys is plain WireGuard.
 
-Not supported: AmneziaWG 3's `HeaderProtectionKey` (the config is refused with that message), random trailers and custom timings. `S4` bytes ride on every packet, so the default MTU drops by `S4` unless `MTU` is set.
+Not supported: AmneziaWG 3's random trailers and custom timings. `S4` bytes ride on every packet, so the default MTU drops by `S4` unless `MTU` is set.
 
 ## Limitations
 

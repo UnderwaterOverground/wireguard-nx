@@ -1,6 +1,7 @@
 # An AmneziaWG peer: amneziawg-go (userspace; no kernel module in the Docker
 # VM) and amneziawg-tools, built from source at pinned tags, with TCP/UDP
-# echo on port 7 like the stock peer.
+# echo on port 7 and iperf3 on 5201 like the stock peer. Two interfaces:
+# awg0 (AmneziaWG 1/2 settings) and awg1 (AmneziaWG 3 header protection).
 FROM golang:1.25-alpine AS go
 ARG AWG_GO_TAG=v3.1.20260828
 RUN apk add --no-cache git make \
@@ -15,7 +16,7 @@ RUN apk add --no-cache git make gcc musl-dev linux-headers bash \
  && make -C /tools/src install WITH_WGQUICK=yes WITH_BASHCOMPLETION=no WITH_SYSTEMDUNITS=no DESTDIR=/out PREFIX=/usr
 
 FROM alpine:3.20
-RUN apk add --no-cache bash iproute2 iptables socat
+RUN apk add --no-cache bash iproute2 iptables socat iperf3
 COPY --from=go /awg/amneziawg-go /usr/bin/
 COPY --from=tools /out/usr/bin/awg /out/usr/bin/awg-quick /usr/bin/
 COPY awg-peer-entrypoint.sh /awg-peer-entrypoint.sh

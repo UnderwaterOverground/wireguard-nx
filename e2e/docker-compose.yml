@@ -49,10 +49,11 @@ services:
     image: wgnx-e2e-awg-peer
     volumes:
       - ./state/awg0.conf:/etc/amnezia/amneziawg/awg0.conf:ro
+      - ./state/awg1.conf:/etc/amnezia/amneziawg/awg1.conf:ro
     devices:
       - /dev/net/tun:/dev/net/tun
     cap_add: [NET_ADMIN]
-    ports: ["51821:51820/udp"]
+    ports: ["51821:51820/udp", "51822:51821/udp"]
     networks:
       wgnx:
         ipv4_address: 172.31.0.22

@@ -15,6 +15,9 @@
 #   awgclient 10.7.1.2  (awg-plain: the same keys without the AmneziaWG keys)
 #   awgswitch 10.7.1.3  for a console on the LAN, via the published port
 #                       (WGNX_LAN_IP overrides the host address it uses)
+# AmneziaWG 3 clients (peers of the header-protected awg1, 10.7.2.1):
+#   awghp 10.7.2.2  (awghp-nokey: the same without HeaderProtectionKey)
+#   awghpswitch 10.7.2.3  for a console, via the published port 51822
 set -euo pipefail
 cd "$(dirname "$0")"
 mkdir -p state
@@ -28,10 +31,12 @@ if [[ ! -s state/keys.txt ]]; then
       k=$(wg genkey); echo "$n $k $(echo "$k" | wg pubkey) $(wg genpsk)"
     done' > state/keys.txt
 fi
-for n in awg awgclient awgswitch; do  # added later: an older state/ may lack them
+for n in awg awgclient awgswitch awghpserver awghp awghpswitch; do  # added later: an older state/ may lack them
   grep -q "^$n " state/keys.txt || docker run --rm --entrypoint sh wgnx-e2e-peer -c \
     "k=\$(wg genkey); echo \"$n \$k \$(echo \"\$k\" | wg pubkey) \$(wg genpsk)\"" >> state/keys.txt
 done
+# The AmneziaWG 3 header protection key (any 32 bytes; `awg genkey` makes one).
+grep -q "^hpkey " state/keys.txt || echo "hpkey $(head -c 32 /dev/urandom | base64) - -" >> state/keys.txt
 key() { awk -v n="$1" -v f="$2" '$1==n {print $f}' state/keys.txt; }  # f: 2 private, 3 public, 4 psk
 SERVER=172.31.0.20
 PEER2=172.31.0.21
@@ -48,6 +53,19 @@ H1 = 1234567
 H2 = 2345678
 H3 = 3456789
 H4 = 4000000-4999999"
+# AmneziaWG 3 on top: header protection, which needs S1-S4 of 12 or more.
+AWG3="Jc = 2
+Jmin = 30
+Jmax = 60
+S1 = 20
+S2 = 31
+S3 = 16
+S4 = 14
+H1 = 11111
+H2 = 22222
+H3 = 33333
+H4 = 40000-49999
+HeaderProtectionKey = $(key hpkey 2)"
 
 client() {  # name address peers...
   local name=$1 addr=$2; shift 2
@@ -87,6 +105,13 @@ AllowedIPs = 10.7.1.1/32"
 client awgclient 10.7.1.2/24 "$AWG" "" "$A" "Endpoint = $AWG_SERVER:51820"
 grep -v -E '^(Jc|Jmin|Jmax|S[1-4]|H[1-4]) ' state/awgclient.conf > state/awg-plain.conf
 client awgswitch 10.7.1.3/24 "$AWG" "" "$A" "Endpoint = ${LAN_IP:-192.0.2.1}:51821" "PersistentKeepalive = 25"
+A3="[Peer]
+# Name = awg3-server
+PublicKey = $(key awghpserver 3)
+AllowedIPs = 10.7.2.1/32"
+client awghp 10.7.2.2/24 "$AWG3" "" "$A3" "Endpoint = $AWG_SERVER:51821"
+grep -v '^HeaderProtectionKey ' state/awghp.conf > state/awghp-nokey.conf
+client awghpswitch 10.7.2.3/24 "$AWG3" "" "$A3" "Endpoint = ${LAN_IP:-192.0.2.1}:51822" "PersistentKeepalive = 25"
 
 {
   printf '[Interface]\nPrivateKey = %s\nAddress = 10.7.0.1/24\nListenPort = 51820\n' "$(key server 2)"
@@ -107,12 +132,18 @@ client awgswitch 10.7.1.3/24 "$AWG" "" "$A" "Endpoint = ${LAN_IP:-192.0.2.1}:518
   server_peer awgclient 10.7.1.2/32
   server_peer awgswitch 10.7.1.3/32
 } > state/awg0.conf
+{
+  printf '[Interface]\nPrivateKey = %s\nAddress = 10.7.2.1/24\nListenPort = 51821\n%s\n' "$(key awghpserver 2)" "$AWG3"
+  server_peer awghp 10.7.2.2/32
+  server_peer awghpswitch 10.7.2.3/32
+} > state/awg1.conf
 
 docker compose --profile peer up -d peer peer2 web iperf awg-peer
 for _ in $(seq 30); do
-  docker compose exec -T peer wg show wg0 >/dev/null 2>&1 && docker compose exec -T awg-peer awg show awg0 >/dev/null 2>&1 && break
+  docker compose exec -T peer wg show wg0 >/dev/null 2>&1 && docker compose exec -T awg-peer awg show awg1 >/dev/null 2>&1 && break
   sleep 1
 done
 echo "server: 10.7.0.1 at $SERVER:51820; peer2: 10.7.0.9 at $PEER2:51820"
 echo "awg server: 10.7.1.1 at $AWG_SERVER:51820 (from the LAN: ${LAN_IP:-?}:51821)"
-echo "confs:  e2e/state/{client,preload,bg,psk,roam,noep,dns,awgclient,awg-plain,awg-switch}.conf"
+echo "awg 3 server (header protection): 10.7.2.1 at $AWG_SERVER:51821 (from the LAN: ${LAN_IP:-?}:51822)"
+echo "confs:  e2e/state/{client,preload,bg,psk,roam,noep,dns,awgclient,awg-plain,awgswitch,awghp,awghp-nokey,awghpswitch}.conf"

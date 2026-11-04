@@ -128,5 +128,16 @@ AWG_IP=10.7.1.1
 if wgnx up --conf /state/awgclient.conf --port 41653 --echo-test "$AWG_IP" --expect-handshake >/tmp/wgnx-e2e-16.log 2>&1; then pass "AmneziaWG echo + handshake"; else fail "AmneziaWG echo + handshake (see /tmp/wgnx-e2e-16.log)"; fi
 if ! wgnx up --conf /state/awg-plain.conf --port 41653 --expect-handshake --duration 15 >/dev/null 2>&1; then pass "plain WireGuard refused by the AmneziaWG server"; else fail "plain WireGuard refused by the AmneziaWG server"; fi
 
+# 17. AmneziaWG 3 header protection: the same again with every header
+# encrypted, at full speed; the same parameters minus the key get nowhere.
+HP_IP=10.7.2.1
+if wgnx up --conf /state/awghp.conf --port 41654 --echo-test "$HP_IP" --expect-handshake >/tmp/wgnx-e2e-17.log 2>&1; then pass "AmneziaWG header protection echo + handshake"; else fail "AmneziaWG header protection echo + handshake (see /tmp/wgnx-e2e-17.log)"; fi
+if ! wgnx up --conf /state/awghp-nokey.conf --port 41654 --expect-handshake --duration 15 >/dev/null 2>&1; then pass "header protection: no key, no handshake"; else fail "header protection: no key, no handshake"; fi
+udp=$(preload awghp "iperf3 -c $HP_IP -u -b 50M -l 1200 -t 4 -R -f m 2>&1 | grep receiver" 2>/dev/null)
+mbps=$(echo "$udp" | awk '{for (i=1;i<=NF;i++) if ($i=="Mbits/sec") print $(i-1)}')
+if awk "BEGIN{exit !(${mbps:-0} >= 47)}"; then pass "UDP 50 Mbit/s through header protection (got ${mbps} Mbit/s)"; else fail "UDP 50 Mbit/s through header protection (got ${mbps:-none})"; fi
+tcp=$(preload awghp "iperf3 -c $HP_IP -t 3 -f m 2>&1 | grep receiver" 2>/dev/null | awk '{for (i=1;i<=NF;i++) if ($i=="Mbits/sec") print $(i-1)}')
+if awk "BEGIN{exit !(${tcp:-0} >= 100)}"; then pass "TCP bulk upload through header protection (got ${tcp} Mbit/s)"; else fail "TCP bulk upload through header protection (got ${tcp:-none})"; fi
+
 echo
 if [[ $fails -eq 0 ]]; then echo "all e2e tests passed"; else echo "$fails test(s) failed"; exit 1; fi
