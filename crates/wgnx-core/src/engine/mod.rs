@@ -754,6 +754,7 @@ mod tests {
             header: [awg::Range { lo: 100, hi: 200 }, awg::Range::one(300), awg::Range::one(400), awg::Range { lo: 500, hi: 600 }],
             signatures: alloc::vec![awg::Signature::parse("<b 0x474554><r 8>").unwrap()],
             header_key: None,
+            random_trailers: false,
         }
     }
 
@@ -942,7 +943,7 @@ mod tests {
     fn amneziawg_header_protection_handshakes_and_carries_data() {
         let hp = || awg::Params { prefix: [12, 22, 16, 13], header_key: Some([7; 32]), ..awg_params() };
         let mut p = Pair::client_server_awg(hp(), hp());
-        assert!(Pair::events(&mut p.a).iter().any(|e| matches!(e, Event::Log(s) if s.ends_with("header protection on"))));
+        assert!(Pair::events(&mut p.a).iter().any(|e| matches!(e, Event::Log(s) if s.contains("header protection on"))));
         let mut burst = Vec::new();
         while let Some(Io::SendUdp { data, .. }) = p.a.poll_io() {
             burst.push(data);

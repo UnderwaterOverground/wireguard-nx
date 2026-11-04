@@ -65,7 +65,9 @@ H1 = 11111
 H2 = 22222
 H3 = 33333
 H4 = 40000-49999
-HeaderProtectionKey = $(key hpkey 2)"
+HeaderProtectionKey = $(key hpkey 2)
+RandomTrailers = on
+ContentPaddingAddition = 1-64"
 
 client() {  # name address peers...
   local name=$1 addr=$2; shift 2

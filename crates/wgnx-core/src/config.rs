@@ -16,8 +16,11 @@
 //! comments may start with "Host" too.
 //!
 //! AmneziaWG's `[Interface]` keys (`Jc`, `Jmin`, `Jmax`, `S1`..`S4`,
-//! `H1`..`H4`, `I1`..`I5`, `HeaderProtectionKey`) are accepted as
-//! amneziawg-tools writes them; see [`crate::awg`].
+//! `H1`..`H4`, `I1`..`I5`, `HeaderProtectionKey`, `RandomTrailers`) are
+//! accepted as amneziawg-tools writes them; see [`crate::awg`]. Its
+//! client-side extras (content padding, timings, `DisableCookies`) change
+//! nothing the peer needs, so they are logged and ignored, and a range
+//! `PersistentKeepalive = 22-30` uses its low end.
 
 use alloc::format;
 use alloc::string::{String, ToString};
@@ -114,6 +117,17 @@ enum Section {
 
 /// Keys wg-quick accepts in `[Interface]` that the engine ignores.
 const IGNORED_INTERFACE_KEYS: &[&str] = &["dns", "table", "preup", "postup", "predown", "postdown", "fwmark", "saveconfig"];
+/// AmneziaWG 3 settings that only change what their owner sends or when it
+/// handshakes; the peer needs nothing from them. Lowercase, then as spelled.
+const AWG_SENDER_KEYS: &[(&str, &str)] = &[
+    ("contentpaddingaddition", "ContentPaddingAddition"),
+    ("rekeyaftertime", "RekeyAfterTime"),
+    ("rekeytimeout", "RekeyTimeout"),
+    ("rejectaftertime", "RejectAfterTime"),
+    ("keepalivetimeout", "KeepaliveTimeout"),
+    ("maxhandshakeattempts", "MaxHandshakeAttempts"),
+    ("disablecookies", "DisableCookies"),
+];
 const KNOWN_KEYS: &[&str] = &[
     "privatekey",
     "address",
@@ -148,6 +162,15 @@ const KNOWN_KEYS: &[&str] = &[
     "i3",
     "i4",
     "i5",
+    "headerprotectionkey",
+    "randomtrailers",
+    "contentpaddingaddition",
+    "rekeyaftertime",
+    "rekeytimeout",
+    "rejectaftertime",
+    "keepalivetimeout",
+    "maxhandshakeattempts",
+    "disablecookies",
 ];
 
 struct PeerBuilder {
@@ -285,7 +308,8 @@ pub fn parse(text: &str) -> Result<WgConfig, ParseError> {
                         b.mtu = Some(mtu);
                     }
                     "jc" | "jmin" | "jmax" => {
-                        let n: u32 = value.parse().map_err(|_| err(line_no, format!("{}: bad value {value:?}", upper(&key))))?;
+                        // AmneziaWG reads an empty value as 0.
+                        let n: u32 = if value.is_empty() { 0 } else { value.parse().map_err(|_| err(line_no, format!("{}: bad value {value:?}", upper(&key))))? };
                         match key.as_str() {
                             "jc" => b.awg.junk_count = n,
                             "jmin" => b.awg.junk_min = n,
@@ -293,7 +317,7 @@ pub fn parse(text: &str) -> Result<WgConfig, ParseError> {
                         }
                     }
                     "s1" | "s2" | "s3" | "s4" => {
-                        let n: u16 = value.parse().map_err(|_| err(line_no, format!("{}: bad value {value:?}", upper(&key))))?;
+                        let n: u16 = if value.is_empty() { 0 } else { value.parse().map_err(|_| err(line_no, format!("{}: bad value {value:?}", upper(&key))))? };
                         b.awg.prefix[slot(&key)] = n;
                     }
                     "h1" | "h2" | "h3" | "h4" => {
@@ -303,6 +327,11 @@ pub fn parse(text: &str) -> Result<WgConfig, ParseError> {
                         b.signatures[slot(&key)] = Some(crate::awg::Signature::parse(value).map_err(|m| err(line_no, format!("{}: {m}", upper(&key))))?);
                     }
                     "headerprotectionkey" => b.awg.header_key = Some(key32(value).map_err(|m| err(line_no, format!("HeaderProtectionKey: {m}")))?),
+                    "randomtrailers" => b.awg.random_trailers = flag(value).ok_or_else(|| err(line_no, format!("RandomTrailers: bad value {value:?}")))?,
+                    k if AWG_SENDER_KEYS.iter().any(|(lower, _)| *lower == k) => {
+                        let name = AWG_SENDER_KEYS.iter().find(|(lower, _)| *lower == k).map(|(_, name)| *name).unwrap_or(k);
+                        log::info!("conf: {name} is an AmneziaWG sender-side setting the Switch doesn't use; ignored");
+                    }
                     k if IGNORED_INTERFACE_KEYS.contains(&k) => log::debug!("conf: ignoring {k}"),
                     k => return Err(err(line_no, format!("unknown [Interface] key {k:?}"))),
                 }
@@ -321,10 +350,12 @@ pub fn parse(text: &str) -> Result<WgConfig, ParseError> {
                     }
                     "endpoint" => b.endpoint = Some(endpoint(value).ok_or_else(|| err(line_no, format!("Endpoint: bad value {value:?}")))?),
                     "persistentkeepalive" => {
+                        // AmneziaWG 3 allows a range (`22-30`): the low end does.
                         b.persistent_keepalive = if value.eq_ignore_ascii_case("off") {
                             None
                         } else {
-                            let n: u16 = value.parse().map_err(|_| err(line_no, format!("PersistentKeepalive: bad value {value:?}")))?;
+                            let r = crate::awg::Range::parse(value).ok().filter(|r| r.hi <= u16::MAX as u32);
+                            let n = r.map(|r| r.lo as u16).ok_or_else(|| err(line_no, format!("PersistentKeepalive: bad value {value:?}")))?;
                             (n > 0).then_some(n)
                         }
                     }
@@ -395,6 +426,15 @@ fn upper(key: &str) -> String {
     let mut s = key.to_string();
     s[..1].make_ascii_uppercase();
     s
+}
+
+/// A boolean as amneziawg-tools reads one.
+fn flag(value: &str) -> Option<bool> {
+    match value.to_ascii_lowercase().as_str() {
+        "true" | "on" | "yes" | "1" => Some(true),
+        "false" | "off" | "no" | "0" => Some(false),
+        _ => None,
+    }
 }
 
 /// A `Host = name a.b.c.d` (or `Host: ...`) comment: None if the comment
@@ -686,6 +726,16 @@ mod tests {
         assert!(!a.is_plain());
         assert_eq!(e("HeaderProtectionKey = 00"), ParseError { line: 4, msg: "HeaderProtectionKey: not valid base64".into() });
         assert_eq!(e(&format!("S1 = 12\nS2 = 12\nS3 = 12\nHeaderProtectionKey = {KEY_B}")).msg, "AmneziaWG: S4 0: HeaderProtectionKey needs S1-S4 of at least 12");
+        // The rest of AmneziaWG 3 as a client conf may carry it: sender-side
+        // settings are ignored, RandomTrailers is kept, a keepalive range
+        // uses its low end, and an empty value is 0.
+        let text = format!("[Interface]\nPrivateKey = {KEY_A}\nAddress = 10.0.0.2\nJc = 3\nJmin = \nJmax = 50\nS3 = \nContentPaddingAddition = 1-64\nRekeyAfterTime = 100-120\nRekeyTimeout = 5\nRejectAfterTime = 180\nKeepaliveTimeout = 10\nMaxHandshakeAttempts = 20\nDisableCookies = true\nRandomTrailers = on\n[Peer]\nPublicKey = {KEY_B}\nPersistentKeepalive = 22-30\n");
+        let c = parse(&text).unwrap();
+        assert!(c.interface.awg.random_trailers);
+        assert_eq!((c.interface.awg.junk_min, c.interface.awg.prefix[2]), (0, 0));
+        assert_eq!(c.peers[0].persistent_keepalive, Some(22));
+        assert_eq!(e("RandomTrailers = maybe").msg, "RandomTrailers: bad value \"maybe\"");
+        assert_eq!(e("ContentPaddingAddition = 1-64\nUnknownThing = 1").msg, "unknown [Interface] key \"unknownthing\"");
     }
 
     #[test]

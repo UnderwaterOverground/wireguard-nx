@@ -24,8 +24,13 @@
 //! be at least 12. That happens last on the way out and first on the way
 //! in, around everything above.
 //!
+//! AmneziaWG 3's other settings are client-side and change only what a
+//! sender does: content padding and random trailers pad what it sends, the
+//! timing keys move its handshake timers. The Switch doesn't send any of
+//! that (a peer accepts the plain sizes regardless), but with
+//! `RandomTrailers` on it accepts the peer's trailed handshake messages.
+//!
 //! Reference: amneziawg-go, `device/{send,receive,noise-protocol,obf*}.go`.
-//! Not covered: AmneziaWG 3's random trailers and custom timings.
 
 use alloc::format;
 use alloc::string::{String, ToString};
@@ -242,11 +247,14 @@ pub struct Params {
     pub signatures: Vec<Signature>,
     /// `HeaderProtectionKey` (AmneziaWG 3).
     pub header_key: Option<[u8; 32]>,
+    /// `RandomTrailers` (AmneziaWG 3): the peer may append random bytes to
+    /// its handshake messages, so their sizes are minimums too.
+    pub random_trailers: bool,
 }
 
 impl Default for Params {
     fn default() -> Self {
-        Self { junk_count: 0, junk_min: 0, junk_max: 0, prefix: [0; 4], header: [Range::one(1), Range::one(2), Range::one(3), Range::one(4)], signatures: Vec::new(), header_key: None }
+        Self { junk_count: 0, junk_min: 0, junk_max: 0, prefix: [0; 4], header: [Range::one(1), Range::one(2), Range::one(3), Range::one(4)], signatures: Vec::new(), header_key: None, random_trailers: false }
     }
 }
 
@@ -264,7 +272,7 @@ pub enum Inbound {
 impl Params {
     /// Nothing to do on the wire: every setting at its WireGuard value.
     pub fn is_plain(&self) -> bool {
-        self.junk_count == 0 && self.prefix == [0; 4] && self.header == Self::default().header && self.signatures.is_empty() && self.header_key.is_none()
+        self.junk_count == 0 && self.prefix == [0; 4] && self.header == Self::default().header && self.signatures.is_empty() && self.header_key.is_none() && !self.random_trailers
     }
 
     pub fn validate(&self) -> Result<(), String> {
@@ -300,12 +308,13 @@ impl Params {
         let [s1, s2, s3, s4] = self.prefix;
         let [h1, h2, h3, h4] = self.header;
         format!(
-            "Jc={} Jmin={} Jmax={} S1={s1} S2={s2} S3={s3} S4={s4} H1={h1} H2={h2} H3={h3} H4={h4} I={} header protection {}",
+            "Jc={} Jmin={} Jmax={} S1={s1} S2={s2} S3={s3} S4={s4} H1={h1} H2={h2} H3={h3} H4={h4} I={} header protection {} trailers {}",
             self.junk_count,
             self.junk_min,
             self.junk_max,
             self.signatures.len(),
-            if self.header_key.is_some() { "on" } else { "off" }
+            if self.header_key.is_some() { "on" } else { "off" },
+            if self.random_trailers { "on" } else { "off" }
         )
     }
 
@@ -351,7 +360,8 @@ impl Params {
     pub fn unwrap(&self, data: &[u8], me: &MyMacs) -> Inbound {
         let Some(t) = self.classify(data) else { return Inbound::Junk };
         let s = self.prefix[t - 1] as usize;
-        let mut msg = data[s..].to_vec();
+        // A handshake message ends where its type says; what follows is a trailer.
+        let mut msg = if t == 4 { data[s..].to_vec() } else { data[s..s + SIZES[t - 1]].to_vec() };
         if let Some(mut cipher) = self.header_cipher(data) {
             cipher.apply_keystream(&mut msg[..PROTECTED[t - 1]]);
         }
@@ -382,7 +392,7 @@ impl Params {
         (1..=4).find(|&t| {
             let s = self.prefix[t - 1] as usize;
             let size = s + SIZES[t - 1];
-            let fits = if t == 4 { data.len() >= size } else { data.len() == size };
+            let fits = if t == 4 || self.random_trailers { data.len() >= size } else { data.len() == size };
             fits && {
                 let mut h: [u8; 4] = data[s..s + 4].try_into().unwrap();
                 for (b, m) in h.iter_mut().zip(mask) {
@@ -495,6 +505,7 @@ mod tests {
             header: [Range { lo: 11, hi: 20 }, Range::one(30), Range { lo: 40, hi: 41 }, Range { lo: 1000, hi: 2000 }],
             signatures: vec![Signature::parse("<b 0x16><r 10>").unwrap()],
             header_key: None,
+            random_trailers: false,
         }
     }
 
@@ -772,7 +783,33 @@ mod tests {
         assert_eq!(short.validate(), Err("S3 11: HeaderProtectionKey needs S1-S4 of at least 12".to_string()));
         assert!(protected().validate().is_ok());
         assert!(!protected().is_plain());
-        assert!(protected().summary().ends_with("header protection on"));
-        assert!(params().summary().ends_with("header protection off"));
+        assert!(protected().summary().contains("header protection on trailers off"));
+        assert!(params().summary().contains("header protection off"));
+    }
+
+    #[test]
+    fn random_trailers_are_accepted_only_when_enabled() {
+        crate::rng::seed(&[11; 32]);
+        let now = Instant::from_nanos(1_000_000_000);
+        let server = MyMacs::new(&SERVER);
+        for p in [params(), protected()] {
+            let mut trailed = Params { random_trailers: true, ..p.clone() };
+            for (t, len) in [(1u8, 148usize), (2, 92), (3, 64)] {
+                let std = message(t, len, &SERVER);
+                let mut wire = p.wrap(&std, &mut PeerMacs::new(&SERVER), now);
+                wire.extend_from_slice(&[0x5a; 37]);
+                assert_eq!(p.unwrap(&wire, &server), Inbound::Junk, "type {t}: a trailer is junk unless enabled");
+                let got = trailed.unwrap(&wire, &server);
+                match t {
+                    3 => assert!(matches!(got, Inbound::CookieReply { .. }), "type {t}"),
+                    _ => assert_eq!(got, Inbound::Message(std), "type {t}: the trailer is dropped"),
+                }
+                // Without the trailer it still works, and the message is not
+                // confused with a longer one.
+                assert_ne!(trailed.unwrap(&wire[..wire.len() - 37], &server), Inbound::Junk);
+            }
+            trailed.random_trailers = false;
+            assert!(!Params { random_trailers: true, ..Params::default() }.is_plain());
+        }
     }
 }
