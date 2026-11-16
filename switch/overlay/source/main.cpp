@@ -12,8 +12,8 @@
 
 #include "wgnx_ctl.h"
 // The newest firmware the sysmodule's Atmosphère libraries know (built from
-// the same tree): on a newer minor or major version they abort before
-// wireguard-nx can log anything.
+// the same tree): on a newer major version they abort before wireguard-nx can
+// log anything (patches/atmosphere-firmware-major-only.patch).
 #include "vapours/ams/ams_target_firmware.h"
 
 namespace {
@@ -364,18 +364,18 @@ namespace {
     bool g_no_boot_flag = false;
     bool g_disabled = false;
     char g_fw_too_new[16] = {};  // the console's firmware, if this build can't run on it
-    char g_fw_max[16] = {};      // what it runs on, e.g. "23.0.x"
+    char g_fw_max[16] = {};      // what it runs on, e.g. "23.x"
 
-    // Same test as libstratosphere's (hos_version_api.cpp): a newer micro
-    // version is fine, a newer minor or major one aborts the sysmodule.
+    // Same test as our patched libstratosphere's (hos_version_api.cpp): a
+    // newer minor or micro version is fine, a newer major one aborts the
+    // sysmodule.
     void CheckFirmware() {
         constexpr u32 MaxMajor = (ATMOSPHERE_TARGET_FIRMWARE_MAX >> 24) & 0xFF;
-        constexpr u32 MaxMinor = (ATMOSPHERE_TARGET_FIRMWARE_MAX >> 16) & 0xFF;
         g_fw_too_new[0] = 0;
-        std::snprintf(g_fw_max, sizeof g_fw_max, "%u.%u.x", MaxMajor, MaxMinor);
+        std::snprintf(g_fw_max, sizeof g_fw_max, "%u.x", MaxMajor);
         SetSysFirmwareVersion fw = {};
         if (R_FAILED(setsysGetFirmwareVersion(&fw))) return;
-        if (fw.major > MaxMajor || (fw.major == MaxMajor && fw.minor > MaxMinor))
+        if (fw.major > MaxMajor)
             std::snprintf(g_fw_too_new, sizeof g_fw_too_new, "%u.%u.%u", fw.major, fw.minor, fw.micro);
     }
 

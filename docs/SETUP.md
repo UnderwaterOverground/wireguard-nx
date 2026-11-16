@@ -295,9 +295,9 @@ limit.
     trying, the server has gone away.
 - **The overlay says the sysmodule isn't running.**
   - If it says which firmware this version runs on, the console's firmware
-    is newer than that: update wireguard-nx. A new firmware needs a new
-    wireguard-nx built for it, which can take a few days after
-    Atmosphère supports it.
+    is newer than that: update wireguard-nx. A new major firmware (24.0,
+    say) needs a new wireguard-nx built for it, which can take a few days
+    after Atmosphère supports it; minor updates (23.5 to 23.6) don't.
   - Check that `atmosphere/contents/4200000000005747/flags/boot2.flag`
     exists.
   - If `config/wireguard-nx/crashed` exists, wireguard-nx turned itself off.
