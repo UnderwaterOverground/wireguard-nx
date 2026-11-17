@@ -96,12 +96,40 @@ static void DriverReopens(const WgnxConfig &cfg) {
     // Reopened when nothing found it gone (the network came back).
     assert(wgnx_driver_reopen(d) == 0 && wgnx_driver_reopens(d, &gone) == 3 && gone == 0 && wgnx_driver_udp_port(d) == port);
 
+    // Found by poll() reporting it readable round after round with nothing
+    // to read and no error (Airplane Mode did that for ~6 s). A UDP socket
+    // shut for reading stands in: always readable, every read empty. Both
+    // ways the loop reads: prefetch then dispatch, and dispatch alone.
+    for (const bool prefetch : {true, false}) {
+        assert(wgnx_driver_prepare(d, fds, WGNX_DRIVER_MAX_FDS, 0, &wait) == 1);
+        const int empty = socket(AF_INET, SOCK_DGRAM, 0);
+        sockaddr_in to{};
+        to.sin_family = AF_INET;
+        to.sin_port = htons(9);
+        to.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        assert(empty >= 0 && connect(empty, reinterpret_cast<sockaddr *>(&to), sizeof to) == 0 && shutdown(empty, SHUT_RD) == 0);
+        assert(dup2(empty, fds[0].fd) == fds[0].fd);
+        close(empty);
+        int rounds = 0;
+        while (!wgnx_driver_broken(d) && rounds < 1000) {
+            assert(wgnx_driver_prepare(d, fds, WGNX_DRIVER_MAX_FDS, 0, &wait) == 1);
+            assert(wgnx_driver_poll(d, fds, 1, 100) == 1 && (fds[0].revents & POLLIN));
+            if (prefetch) wgnx_driver_prefetch(d, fds);
+            wgnx_driver_dispatch(d, fds);
+            rounds++;
+        }
+        assert(rounds == 64);  // UDP_EMPTY_READY_LIMIT
+        assert(wgnx_driver_prepare(d, fds, WGNX_DRIVER_MAX_FDS, 0, &wait) == 0);  // not polled
+        const unsigned int before = wgnx_driver_reopens(d, nullptr);
+        assert(wgnx_driver_reopen(d) == 0 && wgnx_driver_reopens(d, &gone) == before + 1 && gone == -2 && wgnx_driver_udp_port(d) == port);
+    }
+
     // A sleep's suspend is not a broken socket.
     wgnx_driver_suspend(d);
     assert(!wgnx_driver_broken(d));
     wgnx_driver_free(d);
     wgnx_engine_free(engine);
-    std::puts("ok: a dropped socket is found (send, poll), not polled, and reopened on the same port");
+    std::puts("ok: a dropped socket is found (send, poll, empty reads), not polled, and reopened on the same port");
 }
 
 int main() {

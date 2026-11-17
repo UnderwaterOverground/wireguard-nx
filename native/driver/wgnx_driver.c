@@ -33,6 +33,9 @@ int wgnx_snprintf(char *dst, size_t size, const char *fmt, ...);
 // Rounds in a row wgnx_driver_poll may skip poll() while the socket is
 // backlogged, before it polls anyway (for the caller's other fds).
 #define UDP_BACKLOG_ROUNDS 8
+// Rounds in a row poll() may report the socket readable with nothing to read
+// before it is taken as dropped (see empty_ready).
+#define UDP_EMPTY_READY_LIMIT 64
 // Datagrams are read UDP_STAGED at a time into sbuf (page-aligned: on the
 // Switch it is also the socket service's message buffer), UDP_SLOT bytes
 // each (underlay datagrams fit), and handed to the engine from there.
@@ -73,10 +76,16 @@ struct WgnxDriver {
     // goes away without a sleep, e.g. Airplane Mode): sends fail and poll()
     // reports it invalid. Set from any thread that sends (always to 1);
     // cleared by wgnx_driver_reopen on the engine thread. gone_errno: what
-    // said so (-1: poll()); reopens: how many there have been.
+    // said so (-1: poll(); -2: empty_ready); reopens: how many there have
+    // been.
     volatile int broken;
     int gone_errno;
     unsigned int reopens;
+    // Rounds in a row poll() reported the socket readable but nothing was
+    // read. A dropped socket can do this with no error saying so (seen in
+    // Airplane Mode: ~6 s of back-to-back rounds, until a send failed with
+    // EPIPE), so enough of them in a row count as gone.
+    int empty_ready;
 };
 
 // Errors that mean the socket itself is gone, not that a datagram failed
@@ -86,6 +95,15 @@ static int socket_gone(int e) { return e == EPIPE || e == EBADF || e == ENOTSOCK
 static void mark_gone(WgnxDriver *d, int e) {
     if (!d->broken) d->gone_errno = e;
     d->broken = 1;
+}
+
+// After a round's first read: rev is the socket's revents, staged what the
+// read found. Reopening a socket that was fine costs little.
+static void count_empty_ready(WgnxDriver *d, short rev, int staged) {
+    if (staged > 0 || !(rev & POLLIN))
+        d->empty_ready = 0;
+    else if (!d->broken && ++d->empty_ready >= UDP_EMPTY_READY_LIMIT)
+        mark_gone(d, -2);
 }
 
 uint64_t wgnx_driver_now_ns(void) {
@@ -187,6 +205,7 @@ void wgnx_driver_suspend(WgnxDriver *d) {
         d->udp_fd = -1;
     }
     d->broken = 0;
+    d->empty_ready = 0;
     d->backlog = 0;
 }
 
@@ -420,11 +439,16 @@ void wgnx_driver_prefetch(WgnxDriver *d, const struct pollfd *fds) {
     d->n_staged = 0;
     d->staged_all = 0;
     d->prefetched = 1;
-    if (!udp_readable(d, fds)) return;
+    const short rev = d->poll_udp >= 0 ? fds[d->poll_udp].revents : 0;
+    if (!udp_readable(d, fds)) {
+        count_empty_ready(d, 0, 0);
+        return;
+    }
     STEP("UDP prefetch");
     d->n_staged = stage(d);
     d->staged_all = d->n_staged < UDP_STAGED;
     d->backlog = !d->staged_all;
+    count_empty_ready(d, rev, d->n_staged);
 }
 
 int wgnx_driver_poll(WgnxDriver *d, struct pollfd *fds, int nfds, int wait_ms) {
@@ -445,7 +469,8 @@ int wgnx_driver_poll(WgnxDriver *d, struct pollfd *fds, int nfds, int wait_ms) {
 // app reading what we deliver would wait out every read. A video frame
 // arrives as a burst of datagrams, and delivered all at once it overflows
 // the app's socket queue; the rest is read by the next round's prefetch.
-static void udp_receive(WgnxDriver *d) {
+// Returns how many datagrams it handed over.
+static int udp_receive(WgnxDriver *d) {
     int handled = 0;
     const int prefetched = d->prefetched;
     d->prefetched = 0;
@@ -456,7 +481,7 @@ static void udp_receive(WgnxDriver *d) {
         const int drained = d->staged_all;
         d->n_staged = 0;
         d->staged_all = 0;
-        if (drained || prefetched || handled >= UDP_RECV_BATCH) return;
+        if (drained || prefetched || handled >= UDP_RECV_BATCH) return handled;
         STEP("UDP receive");
         d->n_staged = stage(d);
         d->staged_all = d->n_staged < UDP_STAGED;
@@ -537,7 +562,12 @@ int wgnx_driver_poll_stale(WgnxDriver *d, uint64_t until_ns) {
 
 void wgnx_driver_dispatch(WgnxDriver *d, const struct pollfd *fds) {
     // After a prefetch, what it staged (it checked the socket already).
-    if (d->prefetched ? d->n_staged > 0 : udp_readable(d, fds)) udp_receive(d);
+    if (d->prefetched) {
+        if (d->n_staged > 0) udp_receive(d);
+    } else {
+        const short rev = d->poll_udp >= 0 ? fds[d->poll_udp].revents : 0;
+        count_empty_ready(d, rev, udp_readable(d, fds) ? udp_receive(d) : 0);
+    }
     d->prefetched = 0;
     pump_engine(d);
 }

@@ -1419,7 +1419,9 @@ namespace ams {
             int gone_errno = 0;
             if (const unsigned int r = wgnx_driver_reopens(d, &gone_errno); r != reopens) {
                 reopens = r;
-                if (gone_errno) {
+                if (gone_errno == -2) {
+                    Log("udp: socket reopened, port %u (%u so far; it was always ready with nothing to read)", wgnx_driver_udp_port(d), r);
+                } else if (gone_errno) {
                     Log("udp: socket reopened, port %u (%u so far; it was gone: errno %d)", wgnx_driver_udp_port(d), r, gone_errno);
                 } else {
                     Log("udp: socket reopened, port %u (%u so far; the network came back)", wgnx_driver_udp_port(d), r);

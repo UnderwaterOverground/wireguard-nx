@@ -41,8 +41,9 @@ int wgnx_driver_resume(WgnxDriver *d);
 // (on the same port if it can), returning 0 or -1 (still broken: try again
 // later), and the caller then calls wgnx_engine_network_up. reopens counts
 // those, and *gone_errno says what found the last one gone (an errno, the
-// socket service's own numbering for a batched read; -1: poll(); 0: it
-// wasn't, the caller reopened it anyway). Reopen on
+// socket service's own numbering for a batched read; -1: poll(); -2: poll()
+// kept reporting it readable with nothing to read; 0: it wasn't, the caller
+// reopened it anyway). Reopen on
 // the thread that runs the loop.
 int wgnx_driver_broken(const WgnxDriver *d);
 int wgnx_driver_reopen(WgnxDriver *d);
