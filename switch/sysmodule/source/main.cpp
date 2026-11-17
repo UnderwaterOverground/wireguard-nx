@@ -192,6 +192,9 @@ namespace ams {
         // While the console sleeps, logging must not touch the socket service
         // (it may be asleep and block the caller): file only.
         constinit std::atomic<bool> g_log_udp_paused = false;
+        // The socket service dropped the log socket (the network went away
+        // without a sleep); the engine loop opens another once it's back.
+        constinit std::atomic<bool> g_log_udp_lost = false;
         // log_udp pointing at a tunnel address: lines queue here and the
         // engine loop sends them through the tunnel (works away from the LAN).
         constinit bool g_log_tunnel = false;
@@ -246,7 +249,13 @@ namespace ams {
             for (size_t off = 0; off < n;) {
                 const char *nl = static_cast<const char *>(std::memchr(lines + off, '\n', n - off));
                 const size_t len = nl ? static_cast<size_t>(nl - (lines + off)) + 1 : n - off;
-                ::sendto(g_log_udp_fd, lines + off, len, 0, reinterpret_cast<sockaddr *>(std::addressof(g_log_udp_addr)), sizeof g_log_udp_addr);
+                if (::sendto(g_log_udp_fd, lines + off, len, 0, reinterpret_cast<sockaddr *>(std::addressof(g_log_udp_addr)), sizeof g_log_udp_addr) < 0 &&
+                    (errno == EPIPE || errno == EBADF || errno == ENOTSOCK || errno == ENOTCONN)) {
+                    ::close(g_log_udp_fd);
+                    g_log_udp_fd = -1;
+                    g_log_udp_lost = true;
+                    return;
+                }
                 off += len;
             }
         }
@@ -1312,6 +1321,10 @@ namespace ams {
         // 3-7 ms), the hosts file (most of a second) and log lines written
         // to the SD card.
         bool network_check_due = false, network_checked = false;
+        // The network went away while awake (Airplane Mode, Wi-Fi lost): the
+        // socket service may have dropped our sockets with it. After a sleep
+        // they're new anyway.
+        bool lost_awake = false;
         u32 network_ip = 0;
         rt->SetSuspendHooks([] {
             {
@@ -1320,8 +1333,9 @@ namespace ams {
             }
             CloseUdpLogSocket();
             SuspendUpdateCheck();
-        }, [&ip, &network_checked] {
+        }, [&ip, &network_checked, &lost_awake] {
             network_checked = false;  // from before the sleep
+            lost_awake = false;
             g_tunnel_log_hold_until_ns = armTicksToNs(armGetSystemTick()) + 10'000'000'000ull;
             StartUdpLog();
             ip = 0;
@@ -1352,6 +1366,8 @@ namespace ams {
         bool healthy = false;
         size_t heap_all_peak = 0;
         int batched = 0;  // the driver's batched receive state, as last logged
+        unsigned int reopens = 0;  // the driver's socket reopens, as last logged
+        u64 wake_remakes = 0;      // the loop's wake pair, the same
         {
             std::scoped_lock lk(g_log_mutex);
             g_log_defer_thread = os::GetCurrentThread();
@@ -1400,6 +1416,19 @@ namespace ams {
                     Log("udp: one datagram per call (batched receive errno %d)", bsd_errno);
                 }
             }
+            int gone_errno = 0;
+            if (const unsigned int r = wgnx_driver_reopens(d, &gone_errno); r != reopens) {
+                reopens = r;
+                if (gone_errno) {
+                    Log("udp: socket reopened, port %u (%u so far; it was gone: errno %d)", wgnx_driver_udp_port(d), r, gone_errno);
+                } else {
+                    Log("udp: socket reopened, port %u (%u so far; the network came back)", wgnx_driver_udp_port(d), r);
+                }
+            }
+            if (const u64 w = rt->WakeRemakes(); w != wake_remakes) {
+                wake_remakes = w;
+                Log("loop: wake sockets remade (%llu so far)", static_cast<unsigned long long>(w));
+            }
             FlushTunnelLog(engine);
             Timed("update check", [&] { StepUpdateCheck(now); });
             if (now - last_check > (ip ? 5'000'000'000ull : 250'000'000ull)) {
@@ -1410,11 +1439,21 @@ namespace ams {
                 network_checked = false;
                 const u32 cur = network_ip;
                 status::SetOffline(cur == 0);
+                if (cur && g_log_udp_lost.exchange(false)) StartUdpLog();
                 if (cur != ip) {
                     Log("local address changed: %s", cur ? inet_ntoa(in_addr{cur}) : "(offline)");
+                    const bool reopen = cur && (lost_awake || ip);
+                    lost_awake = !cur && (lost_awake || ip);
                     ip = cur;
                     SetLocalNet(cur);
-                    if (cur) wgnx_engine_network_up(engine, wgnx_driver_now_ns());
+                    if (cur) {
+                        // Back after a loss, or on another network: the socket
+                        // may belong to the network that went away (the driver
+                        // notices one that's gone, but not every kind of
+                        // broken). A new one, on the same port if possible.
+                        if (reopen && wgnx_driver_reopen(d) != 0) Log("udp: no socket yet (errno %d); trying again", errno);
+                        wgnx_engine_network_up(engine, wgnx_driver_now_ns());
+                    }
                 }
             }
         }, [&] {

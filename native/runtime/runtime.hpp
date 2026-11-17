@@ -123,11 +123,18 @@ public:
     // sockets). Interposition layers must pass such calls straight through.
     static bool InInternal() { return internal_depth_ > 0; }
 
+    // Rounds of the engine loop so far, and wake pairs it has replaced after
+    // the system dropped them (see wake_gone_).
+    uint64_t Rounds() const { return rounds_.load(std::memory_order_relaxed); }
+    uint64_t WakeRemakes() const { return wake_remakes_.load(std::memory_order_relaxed); }
+
 private:
     Runtime() = default;
     void Loop(const std::function<void(WgnxDriver *)> *on_tick, const std::function<void()> *after_tick);
     void AfterCall();
     void Wake();
+    void RepairWake(uint64_t now);
+    void RepairSocket(uint64_t now);
 
     struct InternalScope {
         InternalScope() { internal_depth_++; }
@@ -153,6 +160,15 @@ private:
     std::function<void()> on_suspend_, on_resume_;
     bool suspended_ = false;
     int wake_rx_ = -1, wake_tx_ = -1;
+    // The console drops every socket when the network goes away without a
+    // sleep (Airplane Mode), the wake pair too: poll() then returns at once
+    // for it, every round. Set when the loop or Wake() finds it gone; the
+    // loop closes the pair and makes a new one (RepairWake). The engine's
+    // own socket is reopened the same way (RepairSocket).
+    std::atomic<bool> wake_gone_{false};
+    uint64_t wake_made_ns_ = 0;  // when a pair was last made (or tried)
+    uint64_t reopened_ns_ = 0;   // when the engine's socket was last reopened
+    std::atomic<uint64_t> rounds_{0}, wake_remakes_{0};
     // While the loop is in poll() (it dropped the lock): until when it
     // waits at most (wgnx_driver_now_ns).
     bool polling_ = false;

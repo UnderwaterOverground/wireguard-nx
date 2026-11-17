@@ -69,7 +69,24 @@ struct WgnxDriver {
     // socket service's errno, if a call failed); misses: batches that came
     // back empty while recvfrom then found a datagram.
     int mmsg_state, mmsg_errno, mmsg_misses;
+    // The socket service dropped the UDP socket (it does when the network
+    // goes away without a sleep, e.g. Airplane Mode): sends fail and poll()
+    // reports it invalid. Set from any thread that sends (always to 1);
+    // cleared by wgnx_driver_reopen on the engine thread. gone_errno: what
+    // said so (-1: poll()); reopens: how many there have been.
+    volatile int broken;
+    int gone_errno;
+    unsigned int reopens;
 };
+
+// Errors that mean the socket itself is gone, not that a datagram failed
+// (ENETUNREACH while offline, say, is the latter).
+static int socket_gone(int e) { return e == EPIPE || e == EBADF || e == ENOTSOCK || e == ENOTCONN; }
+
+static void mark_gone(WgnxDriver *d, int e) {
+    if (!d->broken) d->gone_errno = e;
+    d->broken = 1;
+}
 
 uint64_t wgnx_driver_now_ns(void) {
     struct timespec ts;
@@ -169,6 +186,7 @@ void wgnx_driver_suspend(WgnxDriver *d) {
         close(d->udp_fd);
         d->udp_fd = -1;
     }
+    d->broken = 0;
     d->backlog = 0;
 }
 
@@ -176,6 +194,27 @@ int wgnx_driver_resume(WgnxDriver *d) {
     if (d->udp_fd >= 0 || !d->udp_port) return 0;
     // Same port as before, so peers' notion of our endpoint stays valid.
     return wgnx_driver_open_udp(d, d->udp_port) == 0 ? 0 : wgnx_driver_open_udp(d, 0);
+}
+
+int wgnx_driver_broken(const WgnxDriver *d) { return d->broken; }
+
+unsigned int wgnx_driver_reopens(const WgnxDriver *d, int *gone_errno) {
+    if (gone_errno) *gone_errno = d->gone_errno;
+    return d->reopens;
+}
+
+int wgnx_driver_reopen(WgnxDriver *d) {
+    if (!d->udp_port) return -1;
+    STEP("UDP reopen");
+    // What found it gone, if anything did (else the caller asked, e.g. the
+    // network came back).
+    const int gone = d->broken ? d->gone_errno : 0;
+    wgnx_driver_suspend(d);
+    d->reopens++;
+    d->gone_errno = gone;
+    if (wgnx_driver_resume(d) == 0) return 0;
+    d->broken = 1;  // e.g. still offline: the caller tries again later
+    return -1;
 }
 
 static void udp_send(WgnxDriver *d, const WgnxAddr *to, const uint8_t *data, size_t len) {
@@ -186,7 +225,7 @@ static void udp_send(WgnxDriver *d, const WgnxAddr *to, const uint8_t *data, siz
     memcpy(&sin.sin_addr, to->ip, 4);
     sin.sin_port = htons(to->port);
     // Best effort, like any UDP send: a full socket buffer drops the datagram.
-    sendto(d->udp_fd, data, len, 0, (struct sockaddr *)&sin, sizeof sin);
+    if (sendto(d->udp_fd, data, len, 0, (struct sockaddr *)&sin, sizeof sin) < 0 && socket_gone(errno)) mark_gone(d, errno);
 }
 
 // Reads one datagram into buf. Returns its length, or -1 when there's
@@ -196,6 +235,7 @@ static ssize_t udp_read(WgnxDriver *d, uint8_t *buf, size_t cap, WgnxAddr *src) 
     socklen_t flen = sizeof from;
     memset(&from, 0, sizeof from);
     ssize_t got = recvfrom(d->udp_fd, buf, cap, 0, (struct sockaddr *)&from, &flen);
+    if (got < 0 && socket_gone(errno)) mark_gone(d, errno);
     if (got < 0 || from.sin_family != AF_INET) return -1;
     to_wgnx_addr(&from, src);
     return got;
@@ -226,6 +266,8 @@ static int stage_each(WgnxDriver *d) {
 #define MMSG_CAP ((SBUF_SIZE - 1) / UDP_STAGED - MMSG_HEAD - MMSG_TAIL)
 _Static_assert(MMSG_CAP >= 1500, "batched receive slots must hold a full datagram");
 #define BSD_EAGAIN 11  // the socket service's errno numbering (Linux's)
+// socket_gone()'s errors in that numbering: EPIPE, EBADF, ENOTSOCK, ENOTCONN.
+static int bsd_socket_gone(int e) { return e == 32 || e == 9 || e == 88 || e == 107; }
 
 static void put(uint8_t **p, const void *v, size_t n) {
     memcpy(*p, v, n);
@@ -329,6 +371,10 @@ static int stage(WgnxDriver *d) {
             d->mmsg_state = 1;
             return n;
         }
+        if (n < 0 && bsd_socket_gone(err)) {
+            mark_gone(d, err);  // the socket, not batching, is what failed
+            return 0;
+        }
         if (n < 0 && err != BSD_EAGAIN) {
             d->mmsg_state = -1;  // unsupported here: one datagram per call
             d->mmsg_errno = err;
@@ -346,11 +392,35 @@ static int stage(WgnxDriver *d) {
     return stage_each(d);
 }
 
+// Whether poll() says the UDP socket can be read. Also notices one the
+// socket service dropped (then it can't).
+static int udp_readable(WgnxDriver *d, const struct pollfd *fds) {
+    if (d->poll_udp < 0 || d->broken) return 0;
+    const short rev = fds[d->poll_udp].revents;
+    if (rev & POLLNVAL) {
+        mark_gone(d, -1);
+        return 0;
+    }
+    if (rev & (POLLERR | POLLHUP)) {
+        // Reading SO_ERROR clears an error an ICMP message left (port
+        // unreachable and the like), which would otherwise make every poll()
+        // return at once; only a socket that is gone needs reopening.
+        int err = 0;
+        socklen_t len = sizeof err;
+        if (getsockopt(d->udp_fd, SOL_SOCKET, SO_ERROR, &err, &len) != 0) err = errno;
+        if (socket_gone(err)) {
+            mark_gone(d, err);
+            return 0;
+        }
+    }
+    return (rev & POLLIN) != 0;
+}
+
 void wgnx_driver_prefetch(WgnxDriver *d, const struct pollfd *fds) {
     d->n_staged = 0;
     d->staged_all = 0;
     d->prefetched = 1;
-    if (d->poll_udp < 0 || !(fds[d->poll_udp].revents & POLLIN)) return;
+    if (!udp_readable(d, fds)) return;
     STEP("UDP prefetch");
     d->n_staged = stage(d);
     d->staged_all = d->n_staged < UDP_STAGED;
@@ -434,7 +504,9 @@ int wgnx_driver_prepare(WgnxDriver *d, struct pollfd *fds, int cap, int max_wait
     int n = 0;
     d->poll_udp = -1;
     d->poll_udp_fd = -1;
-    if (d->udp_fd >= 0 && n < cap) {
+    // Not a socket that is gone: poll() would return at once for it, every
+    // round, until it is reopened.
+    if (d->udp_fd >= 0 && !d->broken && n < cap) {
         d->poll_udp = n;
         d->poll_udp_fd = d->udp_fd;
         fds[n].fd = d->udp_fd;
@@ -464,7 +536,9 @@ int wgnx_driver_poll_stale(WgnxDriver *d, uint64_t until_ns) {
 }
 
 void wgnx_driver_dispatch(WgnxDriver *d, const struct pollfd *fds) {
-    if (d->poll_udp >= 0 && (fds[d->poll_udp].revents & POLLIN)) udp_receive(d);
+    // After a prefetch, what it staged (it checked the socket already).
+    if (d->prefetched ? d->n_staged > 0 : udp_readable(d, fds)) udp_receive(d);
+    d->prefetched = 0;
     pump_engine(d);
 }
 

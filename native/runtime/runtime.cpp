@@ -1,6 +1,7 @@
 #include "runtime.hpp"
 
 #include <arpa/inet.h>
+#include <errno.h>
 #include <fcntl.h>
 #include <netinet/in.h>
 #include <poll.h>
@@ -55,6 +56,13 @@ bool MakeWakePair(int *rx, int *tx) {
     fcntl(*tx, F_SETFL, fcntl(*tx, F_GETFL, 0) | O_NONBLOCK);
     return true;
 }
+
+// A socket the system has taken away (Horizon drops them all when the
+// network goes away without a sleep), as opposed to one that is just busy.
+bool SocketGone(int e) { return e == EPIPE || e == EBADF || e == ENOTSOCK || e == ENOTCONN || e == ECONNREFUSED; }
+
+// How often the loop may try to replace a dropped socket.
+constexpr uint64_t kRepairEveryNs = 1'000'000'000;
 
 }  // namespace
 
@@ -130,8 +138,8 @@ void Runtime::Stop() {
     {
         std::lock_guard<std::mutex> lock(mu_);
         stop_ = true;
+        Wake();  // under the lock: the loop may be replacing the pair
     }
-    Wake();
     cv_.notify_all();
 }
 
@@ -149,7 +157,7 @@ Runtime::~Runtime() {
 void Runtime::Wake() {
     if (wake_tx_ < 0) return;
     char b = 0;
-    send(wake_tx_, &b, 1, 0);
+    if (send(wake_tx_, &b, 1, 0) < 0 && SocketGone(errno)) wake_gone_.store(true, std::memory_order_relaxed);
 }
 
 void Runtime::AfterCall() {
@@ -184,6 +192,29 @@ void Runtime::RequestSuspended(SuspendReason why, bool suspended) {
     } while (!async_wanted_.compare_exchange_weak(cur, next));
     // No Wake(): the wake pair is the loop's, and it may be closing it.
     cv_.notify_all();
+}
+
+// With the lock held (Wake() uses the pair under it): replaces a wake pair
+// the system dropped, or one that couldn't be made, once a second at most.
+// Without one the loop still runs, with up to a second of latency.
+void Runtime::RepairWake(uint64_t now) {
+    if (wake_gone_.exchange(false, std::memory_order_relaxed)) {
+        // Closed now, so that poll() stops returning at once for it.
+        if (wake_rx_ >= 0) close(wake_rx_);
+        if (wake_tx_ >= 0) close(wake_tx_);
+        wake_rx_ = wake_tx_ = -1;
+    }
+    if (wake_rx_ >= 0 || now - wake_made_ns_ < kRepairEveryNs) return;
+    wake_made_ns_ = now;
+    if (MakeWakePair(&wake_rx_, &wake_tx_)) wake_remakes_.fetch_add(1, std::memory_order_relaxed);
+}
+
+// With the lock held: reopens the engine's socket if the system dropped it,
+// once a second at most, and has the engine contact its peers again.
+void Runtime::RepairSocket(uint64_t now) {
+    if (!wgnx_driver_broken(driver_) || now - reopened_ns_ < kRepairEveryNs) return;
+    reopened_ns_ = now;
+    if (wgnx_driver_reopen(driver_) == 0) wgnx_engine_network_up(engine_, wgnx_driver_now_ns());
 }
 
 // With the lock held.
@@ -222,9 +253,10 @@ void Runtime::Loop(const std::function<void(WgnxDriver *)> *on_tick, const std::
         ApplyRequests();
         if (suspend_reasons_ != 0) {
             wgnx_driver_suspend(driver_);
-            close(wake_rx_);
-            close(wake_tx_);
+            if (wake_rx_ >= 0) close(wake_rx_);
+            if (wake_tx_ >= 0) close(wake_tx_);
             wake_rx_ = wake_tx_ = -1;
+            wake_gone_.store(false, std::memory_order_relaxed);  // made anew at resume
             if (on_suspend_) on_suspend_();
             suspended_ = true;
             suspended_flag_ = true;
@@ -238,15 +270,23 @@ void Runtime::Loop(const std::function<void(WgnxDriver *)> *on_tick, const std::
             }
             if (stop_) break;  // stopping: keep everything closed
             // Without a wake pair the loop still runs, just with up to a
-            // second of latency for new overlay sockets.
+            // second of latency for new overlay sockets, and RepairWake
+            // tries again.
             if (on_resume_) on_resume_();
             MakeWakePair(&wake_rx_, &wake_tx_);
+            wake_made_ns_ = wgnx_driver_now_ns();
             wgnx_driver_resume(driver_);
             wgnx_engine_network_up(engine_, wgnx_driver_now_ns());
             suspended_ = false;
             suspended_flag_ = false;
             cv_.notify_all();
             continue;
+        }
+        rounds_.fetch_add(1, std::memory_order_relaxed);
+        {
+            const uint64_t now = wgnx_driver_now_ns();
+            RepairWake(now);
+            RepairSocket(now);
         }
         // Housekeeping at most every kTickEveryNs: under load the loop runs
         // hundreds of rounds a second, and the embedder's tick (status,
@@ -283,10 +323,16 @@ void Runtime::Loop(const std::function<void(WgnxDriver *)> *on_tick, const std::
         }
         gate_cv_.notify_all();
         polling_ = false;
-        if (wake_rx_ >= 0 && (fds[n].revents & POLLIN)) {
+        // Only this thread replaces the pair (with the lock, which senders
+        // hold too), so wake_rx_ is still the one polled.
+        if (wake_rx_ >= 0 && (fds[n].revents & (POLLERR | POLLHUP | POLLNVAL))) {
+            wake_gone_.store(true, std::memory_order_relaxed);
+        } else if (wake_rx_ >= 0 && (fds[n].revents & POLLIN)) {
             char buf[64];
-            while (recv(wake_rx_, buf, sizeof buf, 0) > 0) {
+            ssize_t r;
+            while ((r = recv(wake_rx_, buf, sizeof buf, 0)) > 0) {
             }
+            if (r < 0 && SocketGone(errno)) wake_gone_.store(true, std::memory_order_relaxed);
         }
         if (rc > 0) wgnx_driver_dispatch(driver_, fds);
         // Socket readiness may have changed; let waiters re-check.

@@ -35,6 +35,19 @@ const char *wgnx_driver_step(void);
 void wgnx_driver_suspend(WgnxDriver *d);
 int wgnx_driver_resume(WgnxDriver *d);
 
+// Whether the socket service dropped the UDP socket: the network went away
+// without a sleep (Airplane Mode, say), and a send, a read or poll() found
+// it gone. The driver stops polling it; wgnx_driver_reopen opens another
+// (on the same port if it can), returning 0 or -1 (still broken: try again
+// later), and the caller then calls wgnx_engine_network_up. reopens counts
+// those, and *gone_errno says what found the last one gone (an errno, the
+// socket service's own numbering for a batched read; -1: poll(); 0: it
+// wasn't, the caller reopened it anyway). Reopen on
+// the thread that runs the loop.
+int wgnx_driver_broken(const WgnxDriver *d);
+int wgnx_driver_reopen(WgnxDriver *d);
+unsigned int wgnx_driver_reopens(const WgnxDriver *d, int *gone_errno);
+
 // Whether the driver answers WGNX_EVENT_RESOLVE itself with a blocking
 // wgnx_resolve_ipv4 (default: yes) before forwarding the event. Embedders
 // that must not block the engine thread turn this off and resolve from the
