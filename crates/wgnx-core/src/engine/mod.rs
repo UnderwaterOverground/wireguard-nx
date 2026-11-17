@@ -612,6 +612,7 @@ impl Engine {
             },
         };
         let ty = pkt.first().copied().unwrap_or(0);
+        let receiver = pkt.get(4..8).map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]));
         let res = self.wg.recv(self.now, [PacketMut::from(pkt)]);
         log::trace!(
             "wg in type {ty} len {} from {src}: {} to local, {} replies",
@@ -626,8 +627,10 @@ impl Engine {
         let authed = res.to_local.keys().next().copied().or_else(|| {
             res.to_peers.iter().find(|(_, pkts)| pkts.iter().any(|p| matches!(p.as_ref().first(), Some(2 | 4)))).map(|(id, _)| *id)
         });
-        if ty == 4 && authed.is_none() {
-            // Transport data that produced nothing: a session we don't have.
+        if ty == 4 && authed.is_none() && receiver.is_some_and(|r| !self.wg.has_session(r)) {
+            // Transport data that produced nothing, for a session we don't
+            // have. (For one we do, it was a duplicate, a replay, or too late
+            // for the replay window, and needs no answer.)
             if let Some(i) = self.peer_for_source(src) {
                 self.repair_session(i);
             }
@@ -1097,6 +1100,30 @@ mod tests {
         }
         assert!(rounds < 100, "{rounds} rounds in 20 s");
         assert!(initiations >= 3, "{initiations} handshake initiations in 20 s");
+    }
+
+    #[test]
+    fn only_data_for_an_unknown_session_is_answered() {
+        let mut p = Pair::client_server();
+        assert!(udp_echo(&mut p));
+        let a_sock = p.a_sock.unwrap();
+        p.a.net().udp_send_to(a_sock, b"again", "10.7.0.1:7".parse().unwrap()).unwrap();
+        p.a.flush(p.now);
+        let Some(Io::SendUdp { data, .. }) = p.a.poll_io() else { panic!("A sent nothing") };
+        assert_eq!(data[0], 4);
+
+        // Delivered, then delivered again (Wi-Fi can duplicate a datagram):
+        // the copy is dropped, and B has no reason to send anything.
+        p.b.handle_udp(p.a_src, &data, p.now);
+        p.b.handle_udp(p.a_src, &data, p.now);
+        assert!(p.b.poll_io().is_none(), "B answered a duplicate");
+
+        // The same packet for a session B doesn't know (A kept one B lost):
+        // B answers, to get the peer onto a session it has.
+        let mut unknown = data.clone();
+        unknown[4..8].copy_from_slice(&0xdead_beef_u32.to_le_bytes());
+        p.b.handle_udp(p.a_src, &unknown, p.now);
+        assert!(p.b.poll_io().is_some(), "B ignored data for an unknown session");
     }
 
     #[test]
