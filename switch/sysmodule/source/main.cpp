@@ -1259,8 +1259,8 @@ namespace ams {
         SetLocalNet(ip);
 
         // Consoles often have wrong clocks (dead RTC, Nintendo's NTP blocked):
-        // TLS needs a plausible date, and so does WireGuard (handshake
-        // timestamps must never go backwards, or peers ignore us).
+        // WireGuard needs a plausible date (handshake timestamps must never
+        // go backwards, or peers ignore us).
         bool corrected = false;
         const u64 console_time = ConsoleUnixTime();
         u64 unix_time = wgnx_sane_unix_time(console_time, WGNX_UPDATE_HOST, &corrected);

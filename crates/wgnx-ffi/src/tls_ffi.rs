@@ -1,5 +1,6 @@
 //! Standalone TLS sessions over the C ABI. The C side owns the socket and
-//! shuttles bytes; used by the GitHub update check.
+//! shuttles bytes; used by the GitHub update check on hosts (the Switch uses
+//! the console's ssl service).
 
 use alloc::boxed::Box;
 use alloc::format;

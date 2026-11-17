@@ -39,10 +39,12 @@ size_t wgnx_heap_classes(char *buf, size_t len);
 // Seeds the core's CSPRNG with 32 bytes of entropy. Call once at startup.
 void wgnx_seed_rng(const uint8_t seed[32]);
 // Wall-clock time (Unix seconds) used for certificate validity checks (the
-// update check's TLS).
+// update check's TLS on hosts; the Switch uses the console's ssl service).
 void wgnx_set_unix_time(uint64_t unix_secs);
 
 // Standalone TLS 1.3 session; the caller moves bytes between it and a socket.
+// Host builds only: on the Switch the update check uses the console's ssl
+// service, and the linker drops this.
 typedef struct WgnxTls WgnxTls;
 #define WGNX_TLS_ESTABLISHED 1u
 #define WGNX_TLS_PEER_CLOSED 2u

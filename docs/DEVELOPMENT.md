@@ -7,7 +7,7 @@ machine, without a console), and what we learned along the way.
 
 | Path | What |
 |---|---|
-| `crates/wgnx-core` | Sans-IO engine, `no_std + alloc`. It contains: <ul><li>the wg-quick `.conf` parser (`config.rs`)</li><li>WireGuard via vendored `ts_tunnel`, plus what it leaves to us: AllowedIPs routing, endpoints and roaming, keepalives, the 15 s re-handshake rule, statistics (`engine/`)</li><li>smoltcp netstack with a socket API</li><li>a pure-Rust rustls provider (for the update check)</li></ul> It never touches sockets, clocks or OS RNGs; drivers inject them. |
+| `crates/wgnx-core` | Sans-IO engine, `no_std + alloc`. It contains: <ul><li>the wg-quick `.conf` parser (`config.rs`)</li><li>WireGuard via vendored `ts_tunnel`, plus what it leaves to us: AllowedIPs routing, endpoints and roaming, keepalives, the 15 s re-handshake rule, statistics (`engine/`)</li><li>smoltcp netstack with a socket API</li><li>a pure-Rust rustls provider (for the update check on hosts; the Switch uses the console's `ssl` service)</li></ul> It never touches sockets, clocks or OS RNGs; drivers inject them. |
 | `crates/wgnx-ffi` | C ABI (`include/wgnx.h`), built as a staticlib for the Switch and for host C tests |
 | `crates/wgnx-host` | Rust host driver: `up --conf`, `check`, `genkey`, `selftest`, `tls-probe` |
 | `native/driver` | Portable POSIX C driver loop (one UDP socket) plus shared app logic (clock check, echo test, update check). The same code runs on macOS and libnx. |
@@ -215,8 +215,9 @@ fill it; `heap_size.h` is committed with the code that moved it).
 `tools/map-sizes.py switch/sysmodule/build/wireguard-nx.map` shows what the
 binary is made of. Compared with tailscale-nx 1.2.0, dropping the control
 plane, DERP, disco and Taildrop took the Rust code from 615 KB to 430 KB
-and grew the heap from 768 KB to 952 KB; rustls (the update check) is the
-largest remaining piece after WireGuard and the netstack.
+and grew the heap from 768 KB to 952 KB. Doing the update check through the
+console's `ssl` service instead of rustls took another 288 KB of code out
+(heap 916 -> 1204 KB).
 
 ## Notes and findings
 
@@ -242,7 +243,7 @@ largest remaining piece after WireGuard and the netstack.
   netstack and its socket ids survive, sessions start over. A broken file
   leaves what was running in place.
 - **Consoles often have wrong clocks** (HATS-style DNS blocklists block
-  Nintendo NTP; one test console was at 2053), which breaks TLS, and
-  WireGuard too: handshake timestamps must never go backwards for a key,
+  Nintendo NTP; one test console was at 2053), which breaks WireGuard:
+  handshake timestamps must never go backwards for a key,
   or the peer ignores the initiation as a replay. The sysmodule falls back
   to github.com's HTTP `Date` (bounded to [build date, build date + 3 years]).
