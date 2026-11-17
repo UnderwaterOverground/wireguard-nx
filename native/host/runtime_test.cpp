@@ -109,11 +109,12 @@ int main() {
     wgnx_platform_random(seed, 32);
     wgnx_seed_rng(seed);
     // A peer nobody answers at: the engine just keeps trying to handshake.
-    // (A keepalive shorter than its 5 s retries would keep the loop busy.)
+    // Its keepalive is shorter than the 5 s handshake retries, which once
+    // kept the loop busy (the round counts below would show it).
     static const char kConf[] =
         "[Interface]\nPrivateKey = yAnz5TF+lXXJte14tji3zlMNq+hd2rYUIgJBgB3fBmk=\nAddress = 10.7.0.2/32\n"
         "[Peer]\nPublicKey = xTIBA5rboUvnH4htodjb6e697QjLERt1NAB4mZqp8Dg=\nAllowedIPs = 10.7.0.1/32\n"
-        "Endpoint = 127.0.0.1:9\nPersistentKeepalive = 25\n";
+        "Endpoint = 127.0.0.1:9\nPersistentKeepalive = 1\n";
     WgnxEngine *engine = wgnx_engine_new(wgnx_driver_now_ns(), static_cast<uint64_t>(time(nullptr)));
     WgnxConfig cfg{kConf, sizeof kConf - 1};
     char err[128];

@@ -86,6 +86,10 @@ struct Peer {
     keepalive: Option<Duration>,
     /// Any wire packet we sent it (keepalive timer base).
     last_tx: Option<Instant>,
+    /// When the keepalive timer last fired. Without a session that sends
+    /// nothing while a handshake is under way (it retries every 5 s), so a
+    /// shorter keepalive must count from here too, or it stays due.
+    last_keepalive: Option<Instant>,
     /// Last authenticated packet from it.
     last_rx: Option<Instant>,
     last_handshake: Option<Instant>,
@@ -218,6 +222,7 @@ impl Engine {
                 endpoint,
                 keepalive: p.persistent_keepalive.map(|s| Duration::from_secs(s.into())),
                 last_tx: None,
+                last_keepalive: None,
                 last_rx: None,
                 last_handshake: None,
                 unanswered_since: None,
@@ -398,7 +403,7 @@ impl Engine {
                 t = t.min(u + NO_RESPONSE_REKEY);
             }
             if let (Some(ka), Some(_)) = (p.keepalive, p.endpoint) {
-                t = t.min(p.last_tx.map_or(now, |l| l + ka));
+                t = t.min(p.keepalive_base().map_or(now, |l| l + ka));
             }
             if let Some(at) = self.resolve_due(p) {
                 t = t.min(at);
@@ -681,7 +686,8 @@ impl Engine {
             }
             let p = &self.peers[i];
             if let (Some(ka), Some(_)) = (p.keepalive, p.endpoint) {
-                if p.last_tx.is_none_or(|t| now.saturating_duration_since(t) >= ka) {
+                if p.keepalive_base().is_none_or(|t| now.saturating_duration_since(t) >= ka) {
+                    self.peers[i].last_keepalive = Some(now);
                     self.kick(i);
                 }
             }
@@ -711,6 +717,12 @@ impl Engine {
 }
 
 impl Peer {
+    /// What the keepalive timer counts from: the last packet sent, or the
+    /// last time it fired, whichever is later.
+    fn keepalive_base(&self) -> Option<Instant> {
+        self.last_tx.max(self.last_keepalive)
+    }
+
     fn ipv4(&self) -> Option<Ipv4Addr> {
         self.allowed_ips.iter().find_map(|p| match p.addr {
             IpAddr::V4(a) if p.len == 32 => Some(a),
@@ -1061,6 +1073,30 @@ mod tests {
         }
         assert!((5..=7).contains(&keepalives), "{keepalives} keepalives in 31 s");
         assert!(!p.a.peers_info()[0].session || p.a.peers_info()[0].last_handshake.unwrap() < Duration::from_secs(40));
+    }
+
+    #[test]
+    fn short_keepalive_to_a_silent_peer_does_not_spin() {
+        // A keepalive shorter than the 5 s handshake retry, to a peer that
+        // never answers: between retries nothing can be sent, but the
+        // timer must still move on, or the loop runs it back to back.
+        let mut p = Pair::new(peer(B_PRIV, "server", &["10.7.0.1/32"], ep(B_ADDR), Some(1)), peer(A_PRIV, "switch", &["10.7.0.2/32"], None, None));
+        let end = p.now + Duration::from_secs(20);
+        let (mut rounds, mut initiations) = (0, 0);
+        while p.now < end {
+            p.a.handle_timeout(p.now);
+            while let Some(Io::SendUdp { data, .. }) = p.a.poll_io() {
+                if data.first() == Some(&1) {
+                    initiations += 1;
+                }
+            }
+            let next = p.a.next_deadline();
+            assert!(next > p.now, "round {rounds}: next deadline {next:?} is not after now {:?}", p.now);
+            p.now = next;
+            rounds += 1;
+        }
+        assert!(rounds < 100, "{rounds} rounds in 20 s");
+        assert!(initiations >= 3, "{initiations} handshake initiations in 20 s");
     }
 
     #[test]
