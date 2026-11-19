@@ -139,3 +139,8 @@ See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for third-party licences.
 ## License
 
 The sysmodule, overlay and socket layer are GPL-2.0-or-later ([LICENSE](LICENSE)). The Rust engine under `crates/` is BSD-3-Clause ([crates/LICENSE](crates/LICENSE)).
+
+## Found it useful?
+
+If wireguard-nx helped you, a ⭐ on the repo is always appreciated. It's how
+we know it's helping someone.
