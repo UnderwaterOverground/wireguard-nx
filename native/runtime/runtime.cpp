@@ -96,6 +96,8 @@ std::unique_ptr<Runtime> Runtime::Start(RuntimeConfig cfg, std::string *error) {
     WgnxPrefix routes[VSock::MaxRoutes];
     const size_t n = wgnx_engine_routes(rt->engine_, routes, VSock::MaxRoutes);
     VSock::SetRoutes(routes, std::min(n, VSock::MaxRoutes));
+    WgnxPrefix own[VSock::MaxOwnAddrs];
+    VSock::SetOwnAddrs(own, std::min(wgnx_engine_addresses(rt->engine_, own, VSock::MaxOwnAddrs), VSock::MaxOwnAddrs));
     Runtime *self = rt.get();
     rt->driver_ = wgnx_driver_new(
         rt->engine_,

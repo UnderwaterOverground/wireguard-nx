@@ -173,11 +173,15 @@ and anyone with it can join your network as the Switch.
 
 ## AllowedIPs and your own network
 
-Addresses on the network the Switch is on are always reached directly,
-never through the tunnel, even when `AllowedIPs` covers them: at home,
+Addresses on the network the Switch is on are reached directly, not
+through the tunnel, even when `AllowedIPs` covers them: at home,
 Moonlight talks to the PC over Wi-Fi as it always did. Away from home the
-same addresses go through the tunnel. Loopback, link-local, multicast and
-broadcast addresses never go through the tunnel either.
+same addresses go through the tunnel. The exception is a Wi-Fi network
+wide enough to contain the Switch's own tunnel address (a `10.0.0.0/8`
+network around `Address = 10.7.0.2/24`, say): the two overlap, and as on a
+computer the narrower route wins, so the tunnel's addresses still go
+through the tunnel. Loopback, link-local, multicast and broadcast
+addresses never go through the tunnel.
 
 Everything else in `AllowedIPs` goes through the tunnel, including a
 `0.0.0.0/0` default route (for homebrew only; the console's own traffic is

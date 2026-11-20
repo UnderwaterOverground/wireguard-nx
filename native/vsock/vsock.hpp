@@ -108,13 +108,18 @@ public:
     // Whether addr goes through the tunnel: inside one of the routes
     // (SetRoutes: our own addresses and every peer's AllowedIPs), except
     // addresses on our own LAN (SetLocalNet), which are reached directly as
-    // with any on-link route, and special ones (loopback, link-local,
+    // with any on-link route (unless the LAN holds one of our own tunnel
+    // addresses, SetOwnAddrs: then the longer prefix wins, ties going to the
+    // LAN), and special ones (loopback, link-local,
     // multicast, broadcast), which a 0.0.0.0/0 route would otherwise take.
     static bool IsTunnel(const sockaddr *addr);
     // The engine's routes (wgnx_engine_routes), after each reload. At most
     // MaxRoutes are used.
     static constexpr size_t MaxRoutes = 64;
     static void SetRoutes(const WgnxPrefix *routes, size_t n);
+    // Our own tunnel addresses (only IPv4 ones are kept), with the routes.
+    static constexpr size_t MaxOwnAddrs = 4;
+    static void SetOwnAddrs(const WgnxPrefix *addrs, size_t n);
     // Our LAN: IPv4 address (host byte order; 0 = offline) and prefix length.
     static void SetLocalNet(uint32_t ip, unsigned len);
     // Test knob: send LAN addresses through the tunnel too when a route

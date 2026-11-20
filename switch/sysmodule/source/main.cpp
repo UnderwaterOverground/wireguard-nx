@@ -521,13 +521,16 @@ namespace ams {
             return R_SUCCEEDED(nifmGetCurrentIpAddress(&ip)) ? ip : 0;
         }
 
-        // Tells the MITM our LAN (its addresses are reached directly).
-        void SetLocalNet(u32 ip) {
+        // Tells the MITM our LAN (its addresses are reached directly unless
+        // a route is more specific) and logs it.
+        void SetLocalNet(u32 ip, const char *what) {
             u32 cur = 0, mask = 0, gw = 0, dns1 = 0, dns2 = 0;
             unsigned len = 32;
             if (ip && R_SUCCEEDED(nifmGetCurrentIpConfigInfo(&cur, &mask, &gw, &dns1, &dns2)) && cur == ip) {
                 len = static_cast<unsigned>(__builtin_popcount(mask));
             }
+            if (ip) Log("%s, local address %s/%u", what, inet_ntoa(in_addr{ip}), len);
+            else Log("%s: offline", what);
             ::wgnx::VSock::SetLocalNet(ntohl(ip), len);
         }
 
@@ -753,11 +756,13 @@ namespace ams {
             wc.conf_len = static_cast<size_t>(len);
             static char err[160];
             static WgnxPrefix routes[::wgnx::VSock::MaxRoutes];  // 64 * 24 bytes: static, not stack
-            size_t n_routes = 0;
+            size_t n_routes = 0, n_own = 0;
+            WgnxPrefix own[::wgnx::VSock::MaxOwnAddrs];
             u32 peers = 0;
             auto load = [&](WgnxEngine *e) {
                 if (!wgnx_engine_reload(e, &wc, wgnx_driver_now_ns(), err, sizeof err)) return false;
                 n_routes = wgnx_engine_routes(e, routes, ::wgnx::VSock::MaxRoutes);
+                n_own = std::min(wgnx_engine_addresses(e, own, ::wgnx::VSock::MaxOwnAddrs), ::wgnx::VSock::MaxOwnAddrs);
                 static WgnxPeerInfo info[WGNX_CTL_MAX_PEERS];
                 peers = static_cast<u32>(wgnx_engine_peers(e, info, WGNX_CTL_MAX_PEERS));
                 if (g_hosts_on) g_hosts_due = hosts::Collect(e, g_aliases_on) || g_hosts_due.load();
@@ -770,6 +775,7 @@ namespace ams {
                 return WGNX_CTL_CONF_INVALID;
             }
             ::wgnx::VSock::SetRoutes(routes, std::min(n_routes, ::wgnx::VSock::MaxRoutes));
+            ::wgnx::VSock::SetOwnAddrs(own, n_own);
             util::SNPrintf(g_conf_name, sizeof g_conf_name, "%s", name);
             status::SetConf(name, peers);
             WgnxPrefix addr[1];
@@ -1255,8 +1261,7 @@ namespace ams {
             }
         }
         u32 ip = CurrentIp();
-        Log("network up, local address %s", inet_ntoa(in_addr{ip}));
-        SetLocalNet(ip);
+        SetLocalNet(ip, "network up");
 
         // Consoles often have wrong clocks (dead RTC, Nintendo's NTP blocked):
         // WireGuard needs a plausible date (handshake timestamps must never
@@ -1449,11 +1454,10 @@ namespace ams {
                 status::SetOffline(cur == 0);
                 if (cur && g_log_udp_lost.exchange(false)) StartUdpLog();
                 if (cur != ip) {
-                    Log("local address changed: %s", cur ? inet_ntoa(in_addr{cur}) : "(offline)");
                     const bool reopen = cur && (lost_awake || ip);
                     lost_awake = !cur && (lost_awake || ip);
                     ip = cur;
-                    SetLocalNet(cur);
+                    SetLocalNet(cur, "network changed");
                     if (cur) {
                         // Back after a loss, or on another network: the socket
                         // may belong to the network that went away (the driver
