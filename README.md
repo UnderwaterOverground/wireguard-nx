@@ -118,6 +118,8 @@ AmneziaWG 3's other settings (`ContentPaddingAddition`, `RandomTrailers`, the ti
 
 **Will this affect online games or Nintendo services?** No. It only handles homebrew traffic to configured addresses, and leaves Atmosphère's Nintendo-server blocking alone.
 
+**Will it keep working after a system update?** Minor updates (say 23.5 to 23.6) are fine. A new major version (24.0) needs a new wireguard-nx: until then it won't start, and the overlay tells you which firmware it runs on. Update Atmosphère first, as you would anyway. A new release normally follows soon after Atmosphère's, and the update notification lets you know when it's out.
+
 **Can I run it alongside tailscale-nx?** Both can be installed, but only one can handle homebrew at a time. Disable the other in Sysmodules.
 
 **Orange screen when waking during a Moonlight stream?** That's a [Moonlight-Switch issue](https://github.com/XITRIX/Moonlight-Switch/issues/306), also reproducible without wireguard-nx. End the stream before putting the Switch to sleep.
